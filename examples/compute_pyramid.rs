@@ -1,0 +1,73 @@
+// This file is part of the `image-pyramid` crate: <https://github.com/jnickg/image-pyramid>
+// Copyright (C) 2024 jnickg <jnickg83@gmail.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful, but
+// WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+// General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
+//
+// Copyright (C) 2024 jnickg <jnickg83@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-only
+
+//! `cargo run --example compute_pyramid`
+
+use clap::Parser;
+use image_pyramid::*;
+
+#[derive(Parser, Debug)]
+#[command(
+    version,
+    about,
+    long_about = "Compute the image pyramid for the given image file and saves the resultant image as files in the specified directory"
+)]
+struct Args {
+    /// Path to an image for which to compute a pyramid
+    #[arg(long, value_name = "STR")]
+    input: String,
+
+    /// Path to a directory where result files will be saved
+    #[arg(long, value_name = "STR")]
+    output: String,
+}
+
+fn main() {
+  let args = Args::parse();
+  dbg!(&args);
+  let image = match image::open(&args.input) {
+    Ok(image) => image,
+    Err(e) => {
+      eprintln!("Error opening image: {}", e);
+      return;
+    }
+  };
+  let image_extension = match std::path::Path::new(&args.input).extension() {
+    Some(ext) => ext.to_str().unwrap(),
+    None => {
+      eprintln!("Error getting image extension");
+      return;
+    }
+  };
+  let params = ImagePyramidParams::default();
+  let pyramid = match ImagePyramid::create(&image, &params) {
+    Ok(pyramid) => pyramid,
+    Err(e) => {
+      eprintln!("Error creating image pyramid: {}", e);
+      return;
+    }
+  };
+
+  for (l, i) in pyramid.levels.iter().enumerate() {
+    let filename = std::path::Path::new(&args.output).join(format!("L{}.{}", l, image_extension));
+    match i.save(&filename) {
+      Ok(_) => println!("Saved image to {}", filename.to_str().unwrap()),
+      Err(e) => eprintln!("Error saving image: {}", e)
+    }
+  }
+}
