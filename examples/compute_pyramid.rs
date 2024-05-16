@@ -23,18 +23,23 @@ use image_pyramid::*;
 
 #[derive(Parser, Debug)]
 #[command(
-    version,
-    about,
-    long_about = "Compute the image pyramid for the given image file and saves the resultant image as files in the specified directory"
+  version,
+  about,
+  long_about = "Compute the image pyramid for the given image file and saves the resultant image \
+                as files in the specified directory"
 )]
 struct Args {
-    /// Path to an image for which to compute a pyramid
-    #[arg(long, value_name = "STR")]
-    input: String,
+  /// Path to an image for which to compute a pyramid
+  #[arg(long, value_name = "STR")]
+  input: String,
 
-    /// Path to a directory where result files will be saved
-    #[arg(long, value_name = "STR")]
-    output: String,
+  /// Path to a directory where result files will be saved
+  #[arg(long, value_name = "STR")]
+  output: String,
+
+  /// Type of pyramid to compute. Default is "gaussian"
+  #[arg(long, value_name = "STR", default_value = "gaussian")]
+  pyramid_type: Option<String>,
 }
 
 fn main() {
@@ -54,8 +59,25 @@ fn main() {
       return;
     }
   };
-  let params = ImagePyramidParams::default();
-  let pyramid = match ImagePyramid::create(&image, &params) {
+  let mut params = ImagePyramidParams::default();
+  if let Some(pyramid_type) = args.pyramid_type {
+    params.pyramid_type = match pyramid_type.to_lowercase().as_str() {
+      "laplacian" | "bandpass" => ImagePyramidType::Bandpass,
+      "gaussian" | "lowpass" => ImagePyramidType::Lowpass,
+      "steerable" => {
+        eprintln!("Steerable pyramid not yet implemented");
+        return;
+      }
+      _ => {
+        eprintln!(
+          "Invalid pyramid type: {}. Defaulting to gaussian (lowpass)",
+          pyramid_type
+        );
+        ImagePyramidType::Lowpass
+      }
+    };
+  }
+  let pyramid = match ImagePyramid::create(&image, Some(&params)) {
     Ok(pyramid) => pyramid,
     Err(e) => {
       eprintln!("Error creating image pyramid: {}", e);
@@ -67,7 +89,7 @@ fn main() {
     let filename = std::path::Path::new(&args.output).join(format!("L{}.{}", l, image_extension));
     match i.save(&filename) {
       Ok(_) => println!("Saved image to {}", filename.to_str().unwrap()),
-      Err(e) => eprintln!("Error saving image: {}", e)
+      Err(e) => eprintln!("Error saving image: {}", e),
     }
   }
 }
