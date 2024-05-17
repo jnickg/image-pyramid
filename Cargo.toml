@@ -2,7 +2,7 @@
 
 [package]
 name = "image-pyramid"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["jnickg <jnickg83@gmail.com>"]
 edition = "2021"
 description = "A small library to compute image pyramids"
@@ -15,12 +15,13 @@ keywords = ["crate", "image-pyramid", "pyramid", "subsampling", "mipmap"]
 categories = ["computer-vision", "algorithms", "graphics", "multimedia", "multimedia::images"]
 
 [dependencies]
-image = "0.25.1"
+image = { version = "0.25.1", features = ["rayon"], default-features = false }
 num-traits = "0.2.19"
 rayon = "1.10.0"
 
 [dev-dependencies]
 clap = { version = "4.5.4", features = ["derive"] }
+image = "0.25.1"
 version-sync = "0.9.5"
 
 [badges.maintenance]
