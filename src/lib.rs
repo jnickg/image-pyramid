@@ -16,7 +16,7 @@
 // Copyright (C) 2024 jnickg <jnickg83@gmail.com>
 // SPDX-License-Identifier: GPL-3.0-only
 
-#![doc(html_root_url = "https://docs.rs/image-pyramid/0.2.2")]
+#![doc(html_root_url = "https://docs.rs/image-pyramid/0.3.1")]
 #![doc(issue_tracker_base_url = "https://github.com/jnickg/image-pyramid/issues")]
 
 //! # Image Pyramid
@@ -68,7 +68,6 @@
 //! added.
 
 #![deny(
-  warnings,
   nonstandard_style,
   unused,
   future_incompatible,
@@ -78,9 +77,60 @@
   clippy::nursery,
   clippy::pedantic
 )]
-#![recursion_limit = "128"]
 
 use image::{DynamicImage, GenericImage, GenericImageView, Pixel};
+use num_traits::NumCast;
+
+/// A container for a value falling on the range (0.0, 1.0) (exclusive, meaning
+/// the values 0.0 and 1.0 are not valid)
+///
+/// This is useful for safely defining decreasing scale factors.
+///
+/// Other values may be added to this enumeration, such as Float64 value, if
+/// ever there arises a need for 64-bit precision, or even a fixed-point value
+/// if it aided in computation times on embedded platforms.
+#[derive(Debug, Copy, Clone)]
+#[non_exhaustive]
+pub struct UnitIntervalValue(f32);
+
+/// A trait describing some floating-point type that can be converted to a
+/// unit-interval value (0.0 to 1.0, exclusive)
+pub trait IntoUnitInterval {
+  /// Attempts to convert this value into a guaranteed unit-interval value.
+  ///
+  /// Returns an error string if the value is not valid.
+  ///
+  /// # Errors
+  /// - The value is not within the unit range
+  fn into_unit_interval(self) -> Result<UnitIntervalValue, &'static str>;
+}
+
+impl IntoUnitInterval for f32 {
+  fn into_unit_interval(self) -> Result<UnitIntervalValue, &'static str> {
+    match self {
+      v if v <= 0.0 || v >= 1.0 =>
+        Err("Value must be strictly within the unit interval (0.0, 1.0)"),
+      _ => Ok(UnitIntervalValue(self)),
+    }
+  }
+}
+
+impl UnitIntervalValue {
+  /// Attempts to create a new instance from the provided value
+  ///
+  /// # Errors
+  /// - The value is not within the unit range
+  pub fn new<T: IntoUnitInterval>(val: T) -> Result<Self, &'static str> { val.into_unit_interval() }
+
+  /// Retrieves the stored value which is guaranteed to fall between 0.0 and 1.0
+  /// (exclusive)
+  #[must_use]
+  pub const fn get(self) -> f32 {
+    match self {
+      Self(v) => v,
+    }
+  }
+}
 
 /// A simple wrapper extending the functionality of the given image with
 /// image-pyramid support
@@ -90,6 +140,8 @@ pub struct ImageToProcess<'a>(pub &'a DynamicImage);
 ///
 /// For now, these all use a 3x3 kernel for smoothing. As a consequence, the
 /// Gaussian and Triangle smoothing types produce identical results
+#[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum SmoothingType {
   /// Use a Gaussian filter
   /// `[[1,2,1],[2,4,2],[1,2,1]] * 1/16`
@@ -102,18 +154,9 @@ pub enum SmoothingType {
   Triangle,
 }
 
-impl Clone for SmoothingType {
-  fn clone(&self) -> Self {
-    match self {
-      Self::Gaussian => Self::Gaussian,
-      Self::Box => Self::Box,
-      Self::Triangle => Self::Triangle,
-    }
-  }
-}
-
 /// What type of pyramid to compute. Each has different properties,
 /// applications, and computation cost.
+#[derive(Debug, Clone)]
 pub enum ImagePyramidType {
   /// Use smoothing & subsampling to compute pyramid. This is used to generate
   /// mipmaps, thumbnails, display low-resolution previews of expensive image
@@ -131,22 +174,13 @@ pub enum ImagePyramidType {
   Steerable,
 }
 
-impl Clone for ImagePyramidType {
-  fn clone(&self) -> Self {
-    match self {
-      Self::Lowpass => Self::Lowpass,
-      Self::Bandpass => Self::Bandpass,
-      Self::Steerable => Self::Steerable,
-    }
-  }
-}
-
 /// The set of parameters required for computing an image pyramid. For most
 /// applications, the default set of parameters is correct.
+#[derive(Debug, Clone)]
 pub struct ImagePyramidParams {
   /// The scale factor to use on image dimensions when downsampling. This is
   /// most commonly 0.5
-  pub scale_factor: f32,
+  pub scale_factor: UnitIntervalValue,
 
   /// What type of pyramid to compute. See [`ImagePyramidType`] for more
   /// information.
@@ -164,19 +198,9 @@ pub struct ImagePyramidParams {
 impl Default for ImagePyramidParams {
   fn default() -> Self {
     Self {
-      scale_factor:   0.5,
+      scale_factor:   UnitIntervalValue::new(0.5).unwrap(),
       pyramid_type:   ImagePyramidType::Lowpass,
       smoothing_type: SmoothingType::Gaussian,
-    }
-  }
-}
-
-impl Clone for ImagePyramidParams {
-  fn clone(&self) -> Self {
-    Self {
-      scale_factor:   self.scale_factor,
-      pyramid_type:   self.pyramid_type.clone(),
-      smoothing_type: self.smoothing_type.clone(),
     }
   }
 }
@@ -256,12 +280,11 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
     fn compute_lowpass_pyramid(
       image: &DynamicImage,
       params: &ImagePyramidParams,
-    ) -> Vec<DynamicImage> {
-      let mut levels = Vec::new();
-      levels.push(image.clone());
+    ) -> Result<Vec<DynamicImage>, &'static str> {
+      let mut levels = vec![image.clone()];
       let filter_type: image::imageops::FilterType = match params.smoothing_type {
         SmoothingType::Gaussian => image::imageops::FilterType::Gaussian,
-        SmoothingType::Box => std::unimplemented!(),
+        SmoothingType::Box => return Err("Box filter not yet implemented"),
         SmoothingType::Triangle => image::imageops::FilterType::Triangle,
       };
       let mut current_level = image.clone();
@@ -270,13 +293,13 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
       #[allow(clippy::cast_sign_loss)]
       while current_level.width() > 1 && current_level.height() > 1 {
         current_level = current_level.resize_exact(
-          (current_level.width() as f32 * params.scale_factor) as u32,
-          (current_level.height() as f32 * params.scale_factor) as u32,
+          (current_level.width() as f32 * params.scale_factor.get()) as u32,
+          (current_level.height() as f32 * params.scale_factor.get()) as u32,
           filter_type,
         );
         levels.push(current_level.clone());
       }
-      levels
+      Ok(levels)
     }
 
     /// Takes the diference in pixel values between `image` and `other`, adds
@@ -285,12 +308,10 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
     fn bandpass_in_place<I>(image: &mut I, other: &I)
     where I: GenericImage {
       use image::Primitive;
-      use num_traits::NumCast;
       type Subpixel<I> = <<I as GenericImageView>::Pixel as Pixel>::Subpixel;
       let mid_val = ((Subpixel::<I>::DEFAULT_MAX_VALUE - Subpixel::<I>::DEFAULT_MIN_VALUE)
         / NumCast::from(2).unwrap())
         + Subpixel::<I>::DEFAULT_MIN_VALUE;
-      // dbg!(<f32 as NumCast>::from(mid_val).unwrap());
       debug_assert_eq!(image.dimensions(), other.dimensions());
       // Iterate through pixels and compute difference. Add difference to
       // mid_val and apply that to i1
@@ -302,7 +323,6 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
           p.apply2(&other_p, |b1, b2| {
             let diff = <f32 as NumCast>::from(b1).unwrap() - <f32 as NumCast>::from(b2).unwrap();
             let new_val = <f32 as NumCast>::from(mid_val).unwrap() + diff;
-            // dbg!((diff, new_val));
             NumCast::from(new_val).unwrap_or(mid_val)
           });
           image.put_pixel(x, y, p);
@@ -315,20 +335,13 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
 
     match params.pyramid_type {
       ImagePyramidType::Lowpass =>
-        match params.smoothing_type {
-          SmoothingType::Box => Err("Box filter not yet implemented"),
-          _ =>
-            Ok(ImagePyramid {
-              levels: compute_lowpass_pyramid(self.0, &params),
-              params: params.clone(),
-            }),
-        },
+        Ok(ImagePyramid {
+          levels: compute_lowpass_pyramid(self.0, &params)?,
+          params: params.clone(),
+        }),
       ImagePyramidType::Bandpass => {
         // First, we need a lowpass pyramid to work with.
-        let mut levels = match params.smoothing_type {
-          SmoothingType::Box => return Err("Box filter not yet implemented"),
-          _ => compute_lowpass_pyramid(self.0, &params),
-        };
+        let mut levels = compute_lowpass_pyramid(self.0, &params)?;
 
         // For each index N, upscale the resolution N+1 to match N's resolution.
         // Then we compute the pixel-wise difference between them, and
@@ -354,101 +367,93 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
 
 #[cfg(test)]
 mod tests {
+  use test_case::test_matrix;
+
   use super::*;
 
   #[test]
-  fn image_pyramid_create_rgb8_800x600() {
-    let image = DynamicImage::new_rgb8(800, 600);
-
-    let pyramid = ImagePyramid::create(&image, None).unwrap();
-    assert_eq!(pyramid.levels.len(), 10);
-  }
-
-  #[test]
-  fn image_pyramid_create_rgb8() {
-    let image = DynamicImage::new_rgb8(640, 480);
-
-    let pyramid = ImagePyramid::create(&image, None).unwrap();
-    assert_eq!(pyramid.levels.len(), 9);
-  }
-
-  #[test]
-  fn compute_image_pyramid_rgb8() {
-    let image = DynamicImage::new_rgb8(640, 480);
-    let ipr = ImageToProcess(&image);
-
-    let pyramid = ipr.compute_image_pyramid(None).unwrap();
-    assert_eq!(pyramid.levels.len(), 9);
-  }
-
-  #[test]
-  fn image_pyramid_create_rgba8() {
-    let image = DynamicImage::new_rgba8(640, 480);
-
-    let pyramid = ImagePyramid::create(&image, None).unwrap();
-    assert_eq!(pyramid.levels.len(), 9);
-  }
-
-  #[test]
-  fn compute_image_pyramid_rgba8() {
-    let image = DynamicImage::new_rgba8(640, 480);
-    let ipr = ImageToProcess(&image);
-
-    let pyramid = ipr.compute_image_pyramid(None).unwrap();
-    assert_eq!(pyramid.levels.len(), 9);
-  }
-
-  #[test]
-  fn image_pyramid_create_bandpass_rgb8() {
-    let image = DynamicImage::new_rgb8(640, 480);
-
-    let params = ImagePyramidParams {
-      pyramid_type: ImagePyramidType::Bandpass,
-      ..Default::default()
-    };
-
-    let pyramid = ImagePyramid::create(&image, Some(&params)).unwrap();
-    assert_eq!(pyramid.levels.len(), 9);
-  }
-
-  #[test]
-  fn compute_image_pyramid_bandpass_rgb8() {
+  fn compute_image_pyramid_smoothingtype_box_unimplemented() {
     let image = DynamicImage::new_rgb8(640, 480);
     let ipr = ImageToProcess(&image);
 
     let params = ImagePyramidParams {
-      pyramid_type: ImagePyramidType::Bandpass,
+      smoothing_type: SmoothingType::Box,
       ..Default::default()
     };
 
-    let pyramid = ipr.compute_image_pyramid(Some(&params)).unwrap();
-    assert_eq!(pyramid.levels.len(), 9);
+    let pyramid = ipr.compute_image_pyramid(Some(&params));
+    assert!(pyramid.is_err());
   }
 
   #[test]
-  fn image_pyramid_create_bandpass_rgba8() {
-    let image = DynamicImage::new_rgba8(640, 480);
-
-    let params = ImagePyramidParams {
-      pyramid_type: ImagePyramidType::Bandpass,
-      ..Default::default()
-    };
-
-    let pyramid = ImagePyramid::create(&image, Some(&params)).unwrap();
-    assert_eq!(pyramid.levels.len(), 9);
-  }
-
-  #[test]
-  fn compute_image_pyramid_bandpass_rgba8() {
-    let image = DynamicImage::new_rgba8(640, 480);
+  fn compute_image_pyramid_imagepyramidtype_steerable_unimplemented() {
+    let image = DynamicImage::new_rgb8(640, 480);
     let ipr = ImageToProcess(&image);
 
     let params = ImagePyramidParams {
-      pyramid_type: ImagePyramidType::Bandpass,
+      pyramid_type: ImagePyramidType::Steerable,
       ..Default::default()
     };
 
-    let pyramid = ipr.compute_image_pyramid(Some(&params)).unwrap();
-    assert_eq!(pyramid.levels.len(), 9);
+    let pyramid = ipr.compute_image_pyramid(Some(&params));
+    assert!(pyramid.is_err());
+  }
+
+  #[test_matrix(
+    [ImagePyramidType::Lowpass, ImagePyramidType::Bandpass],
+    [SmoothingType::Gaussian, SmoothingType::Triangle]
+  )]
+  fn compute_image_pyramid_every_type(
+    pyramid_type: ImagePyramidType,
+    smoothing_type: SmoothingType,
+  ) {
+    // test_case crate won't let these be parameterized so we loop through them
+    // here.
+    let functors = vec![
+      DynamicImage::new_luma16,
+      DynamicImage::new_luma8,
+      DynamicImage::new_luma_a16,
+      DynamicImage::new_luma_a8,
+      DynamicImage::new_rgb16,
+      DynamicImage::new_rgb8,
+      DynamicImage::new_rgb32f,
+      DynamicImage::new_rgba16,
+      DynamicImage::new_rgba8,
+      DynamicImage::new_rgba32f,
+    ];
+    for functor in functors {
+      let image = functor(128, 128);
+      let ipr = ImageToProcess(&image);
+
+      let params = ImagePyramidParams {
+        pyramid_type: pyramid_type.clone(),
+        smoothing_type: smoothing_type.clone(),
+        ..Default::default()
+      };
+
+      let pyramid = ipr.compute_image_pyramid(Some(&params));
+      assert!(pyramid.is_ok());
+      let pyramid = pyramid.unwrap();
+      assert_eq!(pyramid.levels.len(), 8);
+    }
+  }
+
+  #[test]
+  fn into_unit_interval_f32() {
+    let i = 0.5f32.into_unit_interval();
+    assert!(i.is_ok());
+    assert_eq!(0.5f32, i.unwrap().get());
+  }
+
+  #[test]
+  fn into_unit_interval_err_when_0_0f32() {
+    let i = 0.0f32.into_unit_interval();
+    assert!(i.is_err());
+  }
+
+  #[test]
+  fn into_unit_interval_err_when_1_0f32() {
+    let i = 1.0f32.into_unit_interval();
+    assert!(i.is_err());
   }
 }
