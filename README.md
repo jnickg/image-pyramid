@@ -30,6 +30,28 @@ let pyramid = match ImagePyramid::create(&image, None) {
 };
 ```
 
+Or a slightly more complex example, illustrating how to create a bandpass pyramid where each octave is $2\over{3}$ the resolution, smoothed using a triangle (linear) filter.
+
+```rust
+use image_pyramid::*;
+
+let image = todo!();
+let params = ImagePyramidParams {
+    scale_factor: (2.0 / 3.0).into_unit_interval().unwrap(),
+    pyramid_type: ImagePyramidType::Bandpass,
+    smoothing_type: SmoothingType::Triangle
+};
+let pyramid = match ImagePyramid::create(&image, Some(&params)) {
+    Ok(pyramid) => pyramid,
+    Err(e) => {
+        eprintln!("Error creating image pyramid: {}", e);
+        return;
+    }
+};
+```
+
+The `scale_factor` field is a `UnitIntervalValue`, which must be in the interval $(0, 1)$. Creating a value of this type yields a `Result` and will contain an error if the value is not valid.
+
 ## Support
 
 Open an Issue with questions or bug reports, and feel free to open a PR with proposed changes.

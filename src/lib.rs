@@ -16,7 +16,7 @@
 // Copyright (C) 2024 jnickg <jnickg83@gmail.com>
 // SPDX-License-Identifier: GPL-3.0-only
 
-#![doc(html_root_url = "https://docs.rs/image-pyramid/0.3.1")]
+#![doc(html_root_url = "https://docs.rs/image-pyramid/0.4.1")]
 #![doc(issue_tracker_base_url = "https://github.com/jnickg/image-pyramid/issues")]
 
 //! # Image Pyramid
@@ -57,6 +57,34 @@
 //! };
 //! ```
 //!
+//! Or a slightly more complex example, illustrating how to create a bandpass
+//! pyramid where each octave is 2/3 the resolution, smoothed using a triangle
+//! (linear) filter.
+//!
+//! ```rust
+//! use image::DynamicImage;
+//! use image_pyramid::*;
+//!
+//! let image = DynamicImage::new_rgba8(640, 480); // Or load from file
+//! let params = ImagePyramidParams {
+//!   scale_factor:   (2.0 / 3.0).into_unit_interval().unwrap(),
+//!   pyramid_type:   ImagePyramidType::Bandpass,
+//!   smoothing_type: SmoothingType::Triangle,
+//! };
+//! let pyramid = match ImagePyramid::create(&image, Some(&params)) {
+//!   Ok(pyramid) => pyramid,
+//!   Err(e) => {
+//!     eprintln!("Error creating image pyramid: {}", e);
+//!     return;
+//!   }
+//! };
+//! ```
+//!
+//! [`ImagePyramidParams::scale_factor`] field is a [`UnitIntervalValue`], which
+//! must be a floating-point value in the interval (0, 1). Creating a value of
+//! this type yields a [`Result`] and will contain an error if the value is not
+//! valid.
+//!
 //! ## Support
 //!
 //! Open an Issue with questions or bug reports, and feel free to open a PR with
@@ -80,17 +108,37 @@
 
 use image::{DynamicImage, GenericImage, GenericImageView, Pixel};
 use num_traits::NumCast;
+use thiserror::Error;
+
+/// An enumeration of the errors that may be emitted from the `image_pyramid`
+/// crate
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum ImagePyramidError {
+  /// Raised when the user provides an invalid scale value
+  #[error("Invalid scale_factor value {0} (expected: 0.0 < scale_factor < 1.0)")]
+  BadScaleFactor(f32),
+
+  /// Raised when the requested functionality is not yet supported.
+  #[error("Functionality \"{0}\" is not yet implemented.")]
+  NotImplemented(String),
+
+  /// Raised when something unexpected went wrong in the library.
+  #[error("Internal error: {0}")]
+  Internal(String),
+}
 
 /// A container for a value falling on the range (0.0, 1.0) (exclusive, meaning
 /// the values 0.0 and 1.0 are not valid)
 ///
 /// This is useful for safely defining decreasing scale factors.
 ///
-/// Other values may be added to this enumeration, such as Float64 value, if
-/// ever there arises a need for 64-bit precision, or even a fixed-point value
-/// if it aided in computation times on embedded platforms.
+/// Because this type is currently used only for computing the resized
+/// dimensions of each level of the pyramid, the choice was made to support only
+/// [`f32`]. In the future support may be added for other floating-point types,
+/// such as [`f64`], rational values, or fixed-point, if there arises a need for
+/// such precision and/or performance.
 #[derive(Debug, Copy, Clone)]
-#[non_exhaustive]
 pub struct UnitIntervalValue(f32);
 
 /// A trait describing some floating-point type that can be converted to a
@@ -102,14 +150,13 @@ pub trait IntoUnitInterval {
   ///
   /// # Errors
   /// - The value is not within the unit range
-  fn into_unit_interval(self) -> Result<UnitIntervalValue, &'static str>;
+  fn into_unit_interval(self) -> Result<UnitIntervalValue, ImagePyramidError>;
 }
 
 impl IntoUnitInterval for f32 {
-  fn into_unit_interval(self) -> Result<UnitIntervalValue, &'static str> {
+  fn into_unit_interval(self) -> Result<UnitIntervalValue, ImagePyramidError> {
     match self {
-      v if v <= 0.0 || v >= 1.0 =>
-        Err("Value must be strictly within the unit interval (0.0, 1.0)"),
+      v if v <= 0.0 || v >= 1.0 => Err(ImagePyramidError::BadScaleFactor(v)),
       _ => Ok(UnitIntervalValue(self)),
     }
   }
@@ -120,16 +167,14 @@ impl UnitIntervalValue {
   ///
   /// # Errors
   /// - The value is not within the unit range
-  pub fn new<T: IntoUnitInterval>(val: T) -> Result<Self, &'static str> { val.into_unit_interval() }
+  pub fn new<T: IntoUnitInterval>(val: T) -> Result<Self, ImagePyramidError> {
+    val.into_unit_interval()
+  }
 
   /// Retrieves the stored value which is guaranteed to fall between 0.0 and 1.0
   /// (exclusive)
   #[must_use]
-  pub const fn get(self) -> f32 {
-    match self {
-      Self(v) => v,
-    }
-  }
+  pub const fn get(self) -> f32 { self.0 }
 }
 
 /// A simple wrapper extending the functionality of the given image with
@@ -242,7 +287,7 @@ impl ImagePyramid {
   pub fn create(
     image: &DynamicImage,
     params: Option<&ImagePyramidParams>,
-  ) -> Result<Self, &'static str> {
+  ) -> Result<Self, ImagePyramidError> {
     let image_to_process = ImageToProcess(image);
     let pyramid = image_to_process.compute_image_pyramid(params)?;
 
@@ -258,33 +303,36 @@ pub trait CanComputePyramid {
   /// If no parameters are passed, the default parameters will be used.
   ///
   /// # Errors
-  /// Errors are raised for the following parameter values, which are not yet
-  /// implemented:
+  /// Errors of type [`ImagePyramidError::NotImplemented`] are raised for the
+  /// following parameter values, which are not yet implemented:
   ///
-  /// - [`SmoothingType::Box`] - This smoothing type is not supported in the
-  ///   `image` crate and is not yet implemented manually
+  /// - [`SmoothingType::Box`] - This smoothing type is not yet supported in the
+  ///   `image` crate and is also not yet implemented manually
   /// - [`ImagePyramidType::Steerable`] - Not yet implemented
   fn compute_image_pyramid(
     &self,
     params: Option<&ImagePyramidParams>,
-  ) -> Result<ImagePyramid, &'static str>;
+  ) -> Result<ImagePyramid, ImagePyramidError>;
 }
 
 impl<'a> CanComputePyramid for ImageToProcess<'a> {
   fn compute_image_pyramid(
     &self,
     params: Option<&ImagePyramidParams>,
-  ) -> Result<ImagePyramid, &'static str> {
+  ) -> Result<ImagePyramid, ImagePyramidError> {
     /// Compute a lowpass pyramid with the given params. Ignores
     /// `params.pyramid_type`.
     fn compute_lowpass_pyramid(
       image: &DynamicImage,
       params: &ImagePyramidParams,
-    ) -> Result<Vec<DynamicImage>, &'static str> {
+    ) -> Result<Vec<DynamicImage>, ImagePyramidError> {
       let mut levels = vec![image.clone()];
       let filter_type: image::imageops::FilterType = match params.smoothing_type {
         SmoothingType::Gaussian => image::imageops::FilterType::Gaussian,
-        SmoothingType::Box => return Err("Box filter not yet implemented"),
+        SmoothingType::Box =>
+          return Err(ImagePyramidError::NotImplemented(
+            "SmoothingType::Box".to_string(),
+          )),
         SmoothingType::Triangle => image::imageops::FilterType::Triangle,
       };
       let mut current_level = image.clone();
@@ -309,6 +357,11 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
     where I: GenericImage {
       use image::Primitive;
       type Subpixel<I> = <<I as GenericImageView>::Pixel as Pixel>::Subpixel;
+      // The center value for the given container type. We leverage the `image`
+      // crate's definition of these values to be 1.0 and 0.0 respectively, for
+      // floating-point types (where we want `mid_val` to be 0.5). For unsigned
+      // integer types, we should get half the primitive container's capacity
+      // (e.g. 127 for a u8)
       let mid_val = ((Subpixel::<I>::DEFAULT_MAX_VALUE - Subpixel::<I>::DEFAULT_MIN_VALUE)
         / NumCast::from(2).unwrap())
         + Subpixel::<I>::DEFAULT_MIN_VALUE;
@@ -360,7 +413,10 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
           params,
         })
       }
-      ImagePyramidType::Steerable => Err("Steerable pyramid not yet implemented"),
+      ImagePyramidType::Steerable =>
+        Err(ImagePyramidError::NotImplemented(
+          "ImagePyramidType::Steerable".to_string(),
+        )),
     }
   }
 }
