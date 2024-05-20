@@ -41,7 +41,8 @@ struct Args {
   #[arg(long, value_name = "STR", default_value = "gaussian")]
   pyramid_type: Option<String>,
 
-  /// The scale factor when computing the pyramid. Default is 0.5, and must be in the range (0, 1)
+  /// The scale factor when computing the pyramid. Default is 0.5, and must be
+  /// in the range (0, 1)
   #[arg(long, value_name = "FLOAT", default_value = "0.5")]
   scale_factor: f32,
 }
@@ -84,7 +85,10 @@ fn main() {
   params.scale_factor = match args.scale_factor.into_unit_interval() {
     Ok(scale_factor) => scale_factor,
     Err(_) => {
-      eprintln!("Invalid scale factor: {}. Defaulting to 0.5", args.scale_factor);
+      eprintln!(
+        "Invalid scale factor: {}. Defaulting to 0.5",
+        args.scale_factor
+      );
       0.5.into_unit_interval().unwrap()
     }
   };

@@ -97,17 +97,19 @@
 
 #![deny(
   nonstandard_style,
-  unused,
+  // unused,
+  unsafe_code,
   future_incompatible,
   rust_2018_idioms,
-  unsafe_code,
   clippy::all,
   clippy::nursery,
   clippy::pedantic
 )]
 
+use std::fmt::Debug;
+
 use image::{DynamicImage, GenericImage, GenericImageView, Pixel};
-use num_traits::NumCast;
+use num_traits::{clamp, Num, NumCast};
 use thiserror::Error;
 
 /// An enumeration of the errors that may be emitted from the `image_pyramid`
@@ -175,6 +177,176 @@ impl UnitIntervalValue {
   /// (exclusive)
   #[must_use]
   pub const fn get(self) -> f32 { self.0 }
+}
+
+fn accumulate<P, K>(acc: &mut [K], pixel: &P, weight: K)
+where
+  P: Pixel,
+  <P as Pixel>::Subpixel: Into<K>,
+  K: Num + Copy + Debug,
+{
+  acc
+    .iter_mut()
+    .zip(pixel.channels().iter())
+    .for_each(|(a, c)| {
+      let new_val = <<P as Pixel>::Subpixel as Into<K>>::into(*c) * weight;
+      *a = *a + new_val;
+    });
+}
+
+struct Kernel<K> {
+  data:   Vec<K>,
+  width:  u32,
+  height: u32,
+}
+
+impl<K: Num + Copy + Debug> Kernel<K> {
+  /// Construct a kernel from a slice and its dimensions. The input slice is
+  /// in row-major form. For example, a 3x3 matrix with data
+  /// `[0,1,0,1,2,1,0,1,0`] describes the following matrix:
+  ///
+  /// ```text
+  /// ┌       ┐
+  /// | 0 1 0 |  
+  /// | 1 2 1 |  
+  /// | 0 1 0 |
+  /// └       ┘
+  /// ```
+  ///
+  /// # Errors
+  ///
+  /// - If `width == 0 || height == 0`, [`ImagePyramidError::Internal`] is
+  ///   raised
+  /// - If the provided data does not match the size corresponding to the given
+  ///   dimensions
+  ///
+  /// # Panics
+  ///
+  /// In debug builds, this factory panics under the conditions that [`Err`] is
+  /// returned for release builds.
+  pub fn new(data: &[K], width: u32, height: u32) -> Result<Self, ImagePyramidError> {
+    debug_assert!(width > 0 && height > 0, "width and height must be non-zero");
+    debug_assert!(
+      (width * height) as usize == data.len(),
+      "Invalid kernel len: expecting {}, found {}",
+      width * height,
+      data.len()
+    );
+    // Take the above asserts and return Internal error when appropriate
+    if width == 0 || height == 0 {
+      return Err(ImagePyramidError::Internal(
+        "width and height must be non-zero".to_string(),
+      ));
+    }
+    if (width * height) as usize != data.len() {
+      return Err(ImagePyramidError::Internal(format!(
+        "Invalid kernel len: expecting {}, found {}",
+        width * height,
+        data.len()
+      )));
+    }
+
+    Ok(Self {
+      data: data.to_vec(),
+      width,
+      height,
+    })
+  }
+
+  /// Construct a kernel from a slice and its dimensions, normalizing the data
+  /// to sum to 1.0. The input slice is in row-major form. For example, a 3x3
+  /// matrix with data `[0,1,0,1,2,1,0,1,0`] describes the following matrix:
+  /// ```text
+  /// ┌       ┐
+  /// | 0 1 0 |
+  /// | 1 2 1 | / 6
+  /// | 0 1 0 |
+  /// └       ┘
+  /// ```
+  /// ...where `6` is computed dynamically by summing the elements of the
+  /// kernel. In other words, all the weights in a normalized kernel sum to
+  /// 1.0. This is useful, as many filters have this property
+  ///
+  /// # Errors
+  ///
+  /// - If `width == 0 || height == 0`, [`ImagePyramidError::Internal`] is
+  ///   raised
+  /// - If the provided data does not match the size corresponding to the given
+  ///   dimensions
+  ///
+  /// # Panics
+  ///
+  /// In debug builds, this factory panics under the conditions that [`Err`] is
+  /// returned for release builds.
+  pub fn new_normalized(data: &[K], width: u32, height: u32) -> Result<Kernel<f32>, ImagePyramidError>
+    where K: Into<f32>
+  {
+    let mut sum = K::zero();
+    for i in data {
+      sum = sum + *i;
+    }
+    let data_norm: Vec<f32> = data.iter().map(|x| <K as Into<f32>>::into(*x) / <K as Into<f32>>::into(sum)).collect();
+    Kernel::<f32>::new(&data_norm, width, height)
+  }
+
+  /// Returns 2d correlation of an image. Intermediate calculations are
+  /// performed at type K, and the results converted to pixel Q via f. Pads by
+  /// continuity.
+  #[allow(unsafe_code)]
+  #[allow(unused)]
+  pub fn filter_in_place<I, F>(&self, image: &mut I, mut f: F)
+  where
+    I: GenericImage + Clone,
+    <<I as GenericImageView>::Pixel as Pixel>::Subpixel: Into<K>,
+    F: FnMut(&mut <<I as GenericImageView>::Pixel as Pixel>::Subpixel, K),
+  {
+    use core::cmp::{max, min};
+    let (width, height) = image.dimensions();
+    let num_channels = <<I as GenericImageView>::Pixel as Pixel>::CHANNEL_COUNT as usize;
+    let zero = K::zero();
+    let mut acc = vec![zero; num_channels];
+    #[allow(clippy::cast_lossless)]
+    let (k_width, k_height) = (self.width as i64, self.height as i64);
+    #[allow(clippy::cast_lossless)]
+    let (width, height) = (width as i64, height as i64);
+
+    for y in 0..height {
+      for x in 0..width {
+        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_sign_loss)]
+        let x_u32 = x as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_sign_loss)]
+        let y_u32 = y as u32;
+        for k_y in 0..k_height {
+          #[allow(clippy::cast_possible_truncation)]
+          #[allow(clippy::cast_sign_loss)]
+          let y_p = clamp(y + k_y - k_height / 2, 0, height - 1) as u32;
+          for k_x in 0..k_width {
+            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_sign_loss)]
+            let x_p = clamp(x + k_x - k_width / 2, 0, width - 1) as u32;
+            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_sign_loss)]
+            let k_idx = (k_y * k_width + k_x) as usize;
+
+            accumulate(
+              &mut acc,
+              unsafe { &image.unsafe_get_pixel(x_p, y_p) },
+              unsafe { *self.data.get_unchecked(k_idx) },
+            );
+          }
+        }
+        let mut out_pel = image.get_pixel(x_u32, y_u32);
+        let out_channels = out_pel.channels_mut();
+        for (a, c) in acc.iter_mut().zip(out_channels.iter_mut()) {
+          f(c, *a);
+          *a = zero;
+        }
+        image.put_pixel(x_u32, y_u32, out_pel);
+      }
+    }
+  }
 }
 
 /// A simple wrapper extending the functionality of the given image with
@@ -327,23 +499,21 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
       params: &ImagePyramidParams,
     ) -> Result<Vec<DynamicImage>, ImagePyramidError> {
       let mut levels = vec![image.clone()];
-      let filter_type: image::imageops::FilterType = match params.smoothing_type {
-        SmoothingType::Gaussian => image::imageops::FilterType::Gaussian,
-        SmoothingType::Box =>
-          return Err(ImagePyramidError::NotImplemented(
-            "SmoothingType::Box".to_string(),
-          )),
-        SmoothingType::Triangle => image::imageops::FilterType::Triangle,
+      let kernel = match params.smoothing_type {
+        SmoothingType::Gaussian => Kernel::new_normalized(&[1u8, 2, 3, 2, 4, 2, 1, 2, 1], 3, 3)?,
+        SmoothingType::Box => Kernel::new_normalized(&[1u8, 1, 1, 1, 1, 1, 1, 1, 1], 3, 3)?,
+        SmoothingType::Triangle => Kernel::new_normalized(&[1u8, 2, 1, 2, 4, 2, 1, 2, 1], 3, 3)?,
       };
       let mut current_level = image.clone();
       #[allow(clippy::cast_possible_truncation)]
       #[allow(clippy::cast_precision_loss)]
       #[allow(clippy::cast_sign_loss)]
       while current_level.width() > 1 && current_level.height() > 1 {
+        kernel.filter_in_place(&mut current_level, |c, a| *c = a as u8);
         current_level = current_level.resize_exact(
           (current_level.width() as f32 * params.scale_factor.get()) as u32,
           (current_level.height() as f32 * params.scale_factor.get()) as u32,
-          filter_type,
+          image::imageops::FilterType::Gaussian,
         );
         levels.push(current_level.clone());
       }
@@ -428,17 +598,25 @@ mod tests {
   use super::*;
 
   #[test]
-  fn compute_image_pyramid_smoothingtype_box_unimplemented() {
-    let image = DynamicImage::new_rgb8(640, 480);
-    let ipr = ImageToProcess(&image);
+  fn kernel_filter_in_place() {
+    let mut image = DynamicImage::new_rgb8(3, 3);
+    let mut other = DynamicImage::new_rgb8(3, 3);
+    let mut i = 0;
+    for y in 0..3 {
+      for x in 0..3 {
+        let mut pel = image.get_pixel(x, y);
+        pel.apply_without_alpha(|_| i);
+        image.put_pixel(x, y, pel);
 
-    let params = ImagePyramidParams {
-      smoothing_type: SmoothingType::Box,
-      ..Default::default()
-    };
-
-    let pyramid = ipr.compute_image_pyramid(Some(&params));
-    assert!(pyramid.is_err());
+        let mut pel = other.get_pixel(x, y);
+        pel.apply_without_alpha(|_| i + 1);
+        other.put_pixel(x, y, pel);
+        i += 1;
+      }
+    }
+    let kernel = Kernel::new_normalized(&[1u8, 2, 1, 2, 4, 2, 1, 2, 1], 3, 3).unwrap();
+    kernel.filter_in_place(&mut image, |c, a| *c = a as u8);
+    assert_eq!(image.get_pixel(1, 1), image::Rgba::<u8>([4, 4, 4, 255]));
   }
 
   #[test]
@@ -457,8 +635,9 @@ mod tests {
 
   #[test_matrix(
     [ImagePyramidType::Lowpass, ImagePyramidType::Bandpass],
-    [SmoothingType::Gaussian, SmoothingType::Triangle]
+    [SmoothingType::Gaussian, SmoothingType::Triangle, SmoothingType::Box]
   )]
+  #[allow(clippy::needless_pass_by_value)]
   fn compute_image_pyramid_every_type(
     pyramid_type: ImagePyramidType,
     smoothing_type: SmoothingType,
