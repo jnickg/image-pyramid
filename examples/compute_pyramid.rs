@@ -37,14 +37,17 @@ struct Args {
   #[arg(long, value_name = "STR")]
   output: String,
 
-  /// Type of pyramid to compute. Default is "gaussian"
-  #[arg(long, value_name = "STR", default_value = "gaussian")]
+  /// Type of pyramid to compute.
+  #[arg(long, value_name = "STR", default_value = "lowpass")]
   pyramid_type: Option<String>,
 
-  /// The scale factor when computing the pyramid. Default is 0.5, and must be
-  /// in the range (0, 1)
+  /// Type of smoothing to use when computing the pyramid.
+  #[arg(long, value_name = "STR", default_value = "gaussian")]
+  smoothing_type: Option<String>,
+
+  /// The scale factor when computing the pyramid. Must be in the range (0, 1)
   #[arg(long, value_name = "FLOAT", default_value = "0.5")]
-  scale_factor: f32,
+  scale_factor: Option<f32>,
 }
 
 fn main() {
@@ -65,8 +68,8 @@ fn main() {
     }
   };
   let mut params = ImagePyramidParams::default();
-  if let Some(pyramid_type) = args.pyramid_type {
-    params.pyramid_type = match pyramid_type.to_lowercase().as_str() {
+  params.pyramid_type = if let Some(pyramid_type) = args.pyramid_type {
+    match pyramid_type.to_lowercase().as_str() {
       "laplacian" | "bandpass" => ImagePyramidType::Bandpass,
       "gaussian" | "lowpass" => ImagePyramidType::Lowpass,
       "steerable" => {
@@ -80,17 +83,36 @@ fn main() {
         );
         ImagePyramidType::Lowpass
       }
-    };
-  }
-  params.scale_factor = match args.scale_factor.into_unit_interval() {
-    Ok(scale_factor) => scale_factor,
-    Err(_) => {
-      eprintln!(
-        "Invalid scale factor: {}. Defaulting to 0.5",
-        args.scale_factor
-      );
-      0.5.into_unit_interval().unwrap()
     }
+  } else {
+    ImagePyramidType::Lowpass
+  };
+  params.smoothing_type = if let Some(smoothing_type) = args.smoothing_type {
+    match smoothing_type.to_lowercase().as_str() {
+      "gaussian" => SmoothingType::Gaussian,
+      "box" => SmoothingType::Box,
+      "triangle" => SmoothingType::Triangle,
+      _ => {
+        eprintln!(
+          "Invalid smoothing type: {}. Defaulting to gaussian",
+          smoothing_type
+        );
+        SmoothingType::Gaussian
+      }
+    }
+  } else {
+    SmoothingType::Gaussian
+  };
+  params.scale_factor = if let Some(scale_factor) = args.scale_factor {
+    match scale_factor.into_unit_interval() {
+      Ok(f) => f,
+      Err(_) => {
+        eprintln!("Invalid scale factor: {}. Defaulting to 0.5", scale_factor);
+        0.5.into_unit_interval().unwrap()
+      }
+    }
+  } else {
+    0.5.into_unit_interval().unwrap()
   };
   let pyramid = match ImagePyramid::create(&image, Some(&params)) {
     Ok(pyramid) => pyramid,

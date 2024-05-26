@@ -16,7 +16,7 @@
 // Copyright (C) 2024 jnickg <jnickg83@gmail.com>
 // SPDX-License-Identifier: GPL-3.0-only
 
-#![doc(html_root_url = "https://docs.rs/image-pyramid/0.4.1")]
+#![doc(html_root_url = "https://docs.rs/image-pyramid/0.5.1")]
 #![doc(issue_tracker_base_url = "https://github.com/jnickg/image-pyramid/issues")]
 
 //! # Image Pyramid
