@@ -278,14 +278,22 @@ impl<K: Num + Copy + Debug> Kernel<K> {
   ///
   /// In debug builds, this factory panics under the conditions that [`Err`] is
   /// returned for release builds.
-  pub fn new_normalized(data: &[K], width: u32, height: u32) -> Result<Kernel<f32>, ImagePyramidError>
-    where K: Into<f32>
+  pub fn new_normalized(
+    data: &[K],
+    width: u32,
+    height: u32,
+  ) -> Result<Kernel<f32>, ImagePyramidError>
+  where
+    K: Into<f32>,
   {
     let mut sum = K::zero();
     for i in data {
       sum = sum + *i;
     }
-    let data_norm: Vec<f32> = data.iter().map(|x| <K as Into<f32>>::into(*x) / <K as Into<f32>>::into(sum)).collect();
+    let data_norm: Vec<f32> = data
+      .iter()
+      .map(|x| <K as Into<f32>>::into(*x) / <K as Into<f32>>::into(sum))
+      .collect();
     Kernel::<f32>::new(&data_norm, width, height)
   }
 
@@ -371,6 +379,112 @@ pub enum SmoothingType {
   Triangle,
 }
 
+/// Parameters for generating a steerable image pyramid. These parameters are
+/// used to compute the steerable filters for each orientation.
+///
+/// Steerable Filters are a class of oriented filters that can be expressed as a
+/// linear combination of a set of basis filters. As an example, let us consider
+/// isotropic Gaussian filter G(x,y):
+/// - G(x,y)=e−(x2+y2)
+///
+/// First derivative of G(x,y) is given by G_1 and let G^θ_1 be the first
+/// derivative rotated by an angle θ about the origin. In x direction the angle
+/// θ=0∘ and in y direction, θ=90∘:
+/// - G^{0∘}_1 = ∂G/∂x G^{0∘}_1 = −2xe−(x2+y2), and
+/// - G^{90∘}_1 = ∂G/∂y G^{90∘}_1 = −2ye−(x2+y2)
+///
+/// In 2D space G^{0∘}_1 and G^{90∘}_1 are seen to span the entire space and are
+/// the basis filters. An arbitrarily oriented first derivative filter can be
+/// expressed as a linear combination of these two filters:
+///
+/// G{θ∘})1 = G^{0∘}_1 cos(θ) + G^{90∘}_1 sin(θ)
+///
+#[derive(Debug, Clone)]
+pub struct SteerableParams {
+  pub num_orientations: u8,
+  pub kernel_size: u8
+}
+
+impl Default for SteerableParams {
+  fn default() -> Self {
+    Self {
+      num_orientations: 4,
+      kernel_size: 5
+    }
+  }
+}
+
+pub(crate) fn sample_triangle_1d(x: f32) -> f32 {
+  1.0 - x.abs()
+}
+
+pub(crate) fn sample_gaussian_1d(x: f32, sigma: f32) -> f32 {
+  ((2.0 * std::f32::consts::PI).sqrt() * sigma).recip() * (-x.powi(2) / (2.0 * sigma.powi(2))).exp()
+}
+
+pub(crate) fn sample_gaussian_1d_derivative(x: f32, sigma: f32) -> f32 {
+  -x * sample_gaussian_1d(x, sigma) / sigma.powi(2)
+}
+
+pub(crate) fn sample_gaussian_2d(x: f32, y: f32, sigma: f32) -> f32 {
+  sample_gaussian_1d(x, sigma) * sample_gaussian_1d(y, sigma)
+}
+
+pub(crate) fn sample_gaussian_2d_derivative_x(x: f32, y: f32, sigma: f32) -> f32 {
+  sample_gaussian_1d_derivative(x, sigma) * sample_gaussian_1d(y, sigma)
+}
+
+pub(crate) fn sample_gaussian_2d_derivative_y(x: f32, y: f32, sigma: f32) -> f32 {
+  sample_gaussian_1d(x, sigma) * sample_gaussian_1d_derivative(y, sigma)
+}
+
+
+impl SteerableParams {
+  pub fn new(num_orientations: u8, kernel_size: u8) -> Self {
+    Self {
+      num_orientations,
+      kernel_size
+    }
+  }
+
+  /// This takes the number of orientations and computes the first-order
+  /// derivative-of-Gaussian kernels for each orientation.
+  ///
+  /// It starts by computing the angles for each filter, then creates the two
+  /// basis filters, and then computes each steerable filter as a linear
+  /// combination of the two basis filters.
+  pub(crate) fn get_kernels(&self) -> Vec<Kernel<f32>> {
+    let angles: Vec<f32> = (0..self.num_orientations)
+      .map(|i| (i as f32) * 180.0 / (self.num_orientations as f32))
+      .collect();
+
+    angles
+      .iter()
+      .map(|angle| {
+        let angle_rad = angle.to_radians();
+        Kernel::new(
+          &(0..self.kernel_size)
+            .flat_map(|y| {
+              (0..self.kernel_size)
+                .map(move |x| {
+                  let x_f = x as f32 - (self.kernel_size as f32) / 2.0;
+                  let y_f = y as f32 - (self.kernel_size as f32) / 2.0;
+                  let cos = angle_rad.cos();
+                  let sin = angle_rad.sin();
+                  let g0_1 = sample_gaussian_2d_derivative_x(x_f, y_f, 1.0);
+                  let g90_1 = sample_gaussian_2d_derivative_y(x_f, y_f, 1.0);
+                  g0_1 * cos + g90_1 * sin
+                })
+            })
+            .collect::<Vec<f32>>(),
+          self.kernel_size as u32,
+          self.kernel_size as u32,
+        ).unwrap()
+      })
+      .collect()
+  }
+}
+
 /// What type of pyramid to compute. Each has different properties,
 /// applications, and computation cost.
 #[derive(Debug, Clone)]
@@ -378,17 +492,17 @@ pub enum ImagePyramidType {
   /// Use smoothing & subsampling to compute pyramid. This is used to generate
   /// mipmaps, thumbnails, display low-resolution previews of expensive image
   /// processing operations, texture synthesis, and more.
-  Lowpass,
+  Lowpass(SmoothingType),
 
   /// AKA Laplacian pyramid, where adjacent levels of the lowpass pyramid are
   /// upscaled and their pixel differences are computed. This used in image
   /// processing routines such as blending.
-  Bandpass,
+  Bandpass(SmoothingType),
 
   /// Uses a bank of multi-orientation bandpass filters. Used for used for
   /// applications including image compression, texture synthesis, and object
   /// recognition.
-  Steerable,
+  Steerable(SteerableParams),
 }
 
 /// The set of parameters required for computing an image pyramid. For most
@@ -402,10 +516,6 @@ pub struct ImagePyramidParams {
   /// What type of pyramid to compute. See [`ImagePyramidType`] for more
   /// information.
   pub pyramid_type: ImagePyramidType,
-
-  /// What type of smoothing to use when computing pyramid levels. See
-  /// [`SmoothingType`] for more information.
-  pub smoothing_type: SmoothingType,
 }
 
 /// Generates a useful default set of parameters.
@@ -416,8 +526,17 @@ impl Default for ImagePyramidParams {
   fn default() -> Self {
     Self {
       scale_factor:   UnitIntervalValue::new(0.5).unwrap(),
-      pyramid_type:   ImagePyramidType::Lowpass,
-      smoothing_type: SmoothingType::Gaussian,
+      pyramid_type:   ImagePyramidType::Lowpass(SmoothingType::Gaussian),
+    }
+  }
+}
+
+impl ImagePyramidParams {
+  pub fn get_smoothing_type(&self) -> Option<&SmoothingType> {
+    match &self.pyramid_type {
+      ImagePyramidType::Lowpass(smoothing_type) => Some(smoothing_type),
+      ImagePyramidType::Bandpass(smoothing_type) => Some(smoothing_type),
+      _ => None,
     }
   }
 }
@@ -499,7 +618,8 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
       params: &ImagePyramidParams,
     ) -> Result<Vec<DynamicImage>, ImagePyramidError> {
       let mut levels = vec![image.clone()];
-      let kernel = match params.smoothing_type {
+      let smoothing_type = params.get_smoothing_type().unwrap_or(&SmoothingType::Gaussian);
+      let kernel = match smoothing_type {
         SmoothingType::Gaussian => Kernel::new_normalized(&[1u8, 2, 3, 2, 4, 2, 1, 2, 1], 3, 3)?,
         SmoothingType::Box => Kernel::new_normalized(&[1u8, 1, 1, 1, 1, 1, 1, 1, 1], 3, 3)?,
         SmoothingType::Triangle => Kernel::new_normalized(&[1u8, 2, 1, 2, 4, 2, 1, 2, 1], 3, 3)?,
@@ -557,12 +677,12 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
     let params = params.map_or_else(ImagePyramidParams::default, std::clone::Clone::clone);
 
     match params.pyramid_type {
-      ImagePyramidType::Lowpass =>
+      ImagePyramidType::Lowpass(_) =>
         Ok(ImagePyramid {
           levels: compute_lowpass_pyramid(self.0, &params)?,
           params: params.clone(),
         }),
-      ImagePyramidType::Bandpass => {
+      ImagePyramidType::Bandpass(_) => {
         // First, we need a lowpass pyramid to work with.
         let mut levels = compute_lowpass_pyramid(self.0, &params)?;
 
@@ -583,7 +703,7 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
           params,
         })
       }
-      ImagePyramidType::Steerable =>
+      ImagePyramidType::Steerable(_params) =>
         Err(ImagePyramidError::NotImplemented(
           "ImagePyramidType::Steerable".to_string(),
         )),
@@ -625,7 +745,7 @@ mod tests {
     let ipr = ImageToProcess(&image);
 
     let params = ImagePyramidParams {
-      pyramid_type: ImagePyramidType::Steerable,
+      pyramid_type: ImagePyramidType::Steerable(SteerableParams::default()),
       ..Default::default()
     };
 
@@ -690,5 +810,14 @@ mod tests {
   fn into_unit_interval_err_when_1_0f32() {
     let i = 1.0f32.into_unit_interval();
     assert!(i.is_err());
+  }
+
+  #[test]
+  fn steerable_params_get_kernels() {
+    let params = SteerableParams::new(4, 5);
+    let kernels = params.get_kernels();
+    assert_eq!(kernels.len(), 4);
+    assert_eq!(kernels[0].width, 5);
+    assert_eq!(kernels[0].height, 5);
   }
 }
