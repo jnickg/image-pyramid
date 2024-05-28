@@ -78,6 +78,11 @@
 //! pyramid where each octave is 2/3 the resolution, smoothed using a triangle
 //! (linear) filter.
 //!
+//! [`ImagePyramidParams::scale_factor`] field is a [`UnitIntervalValue`], which
+//! must be a floating-point value in the interval (0, 1). Creating a value of
+//! this type yields a [`Result`] and will contain an error if the value is not
+//! valid.
+//!
 //! ```rust
 //! use image::DynamicImage;
 //! use image_pyramid::*;
@@ -149,20 +154,15 @@
 //! };
 //! ```
 //!
-//! [`ImagePyramidParams::scale_factor`] field is a [`UnitIntervalValue`], which
-//! must be a floating-point value in the interval (0, 1). Creating a value of
-//! this type yields a [`Result`] and will contain an error if the value is not
-//! valid.
+//! For any pyramid, the result is a [`ImagePyramid`] instance, which contains
+//! the levels of the pyramid. Each level is a variant of [`ImagePyramidLevel`].
+//! Unless a steerable pyramid is made, levels are always
+//! [`ImagePyramidLevel::Single`], which contain a single `DynamicImage`
+//! instance.
 //!
-//! ## Support
+//! ## Support & Contributing
 //!
-//! Open an Issue with questions or bug reports, and feel free to open a PR with
-//! proposed changes.
-//!
-//! ## Contributing
-//!
-//! Follow standard Rust conventions, and be sure to add tests for any new code
-//! added.
+//! See the readme on the [GitHub page](http://www.github.com/jnickg/image-pyramid)
 
 #![deny(
   nonstandard_style,

@@ -104,9 +104,9 @@ fn main() {
       "gaussian" | "lowpass" => ImagePyramidType::Lowpass(smoothing_type(kernel_size)),
       "steerable" => {
         let orientations = if let Some(orientations) = args.num_orientations {
-          eprintln!("Number of orientations must be specified when using steerable pyramid");
           NonZeroU8::new(orientations)
         } else {
+          eprintln!("Number of orientations not specified. Defaulting to 4...");
           NonZeroU8::new(4)
         };
         let orientations = if let Some(orientations) = orientations { orientations } else {

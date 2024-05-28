@@ -20,65 +20,24 @@ The [`image`](https://crates.io/crates/image) crate is used for image I/O and
 manipulation, and the [`num-traits`](https://crates.io/crates/num-traits) crate
 is used for numeric operations.
 
-## Background
+## Background & Usage
 
-- See [OpenCV: Image Pyramids](https://docs.opencv.org/4.x/dc/dff/tutorial_py_pyramids.html)
-  for an overview of the two most common pyramid types, Lowpass (AKA
-  Gaussian) and Bandpass (AKA Laplacian).
-- The Tomasi paper [Lowpass and Bandpass Pyramids](https://courses.cs.duke.edu/cps274/fall14/notes/Pyramids.pdf)
-  has an authoritative explanation as well.
-- [Wikipedia](https://en.wikipedia.org/wiki/Pyramid_(image_processing)#Steerable_pyramid)
-  has a decent explanation of a steerable pyramid
-- [This NYU Page](http://www.cns.nyu.edu/~eero/steerpyr/) has a good
- explanation of steerable pyramids
-
-## Usage
-
-See the [crates.io page](https://crates.io/crates/image-pyramid) for installation instructions, then check out the [examples directory](./examples/) for example code. Below is a simple illustrative example of computing a default pyramid (Gaussian where each level is half resolution).
-
-```rust
-use image_pyramid::*;
-
-let image = todo!();
-let pyramid = match ImagePyramid::create(&image, None) {
-    Ok(pyramid) => pyramid,
-    Err(e) => {
-        eprintln!("Error creating image pyramid: {}", e);
-        return;
-    }
-};
-```
-
-Or a slightly more complex example, illustrating how to create a bandpass pyramid where each octave is $2\over{3}$ the resolution, smoothed using a triangle (linear) filter.
-
-```rust
-use image_pyramid::*;
-
-let image = todo!();
-let params = ImagePyramidParams {
-    scale_factor: (2.0 / 3.0).into_unit_interval().unwrap(),
-    pyramid_type: ImagePyramidType::Bandpass,
-    smoothing_type: SmoothingType::Triangle
-};
-let pyramid = match ImagePyramid::create(&image, Some(&params)) {
-    Ok(pyramid) => pyramid,
-    Err(e) => {
-        eprintln!("Error creating image pyramid: {}", e);
-        return;
-    }
-};
-```
-
-The `scale_factor` field is a `UnitIntervalValue`, which must be in the interval $(0, 1)$. Creating a value of this type yields a `Result` and will contain an error if the value is not valid.
+See the [`crates.io` page](https://crates.io/crates/image-pyramid) for more information on image pyramids in general, as well as usage & documentation.
 
 ## Building
+
+All the normal `cargo` commands should work as expected.
 
 Use `RUSTDOCFLAGS="--html-in-header katex-header.html" cargo doc --no-deps` to build documentation with LaTeX support. Additionally, see [this repo](https://github.com/paulkernfeld/rustdoc-katex-demo) for more info on shoehorning in LaTeX support.
 
 ## Support
 
-Open an Issue with questions or bug reports, and feel free to open a PR with proposed changes.
+Open an Issue with questions, feature requests, or bug reports, and feel free to open a PR with proposed changes.
 
 ## Contributing
 
-Follow standard Rust conventions, and be sure to add tests for any new code added.
+Follow standard Rust conventions, and be sure to add tests for any new code added. Any opened PRs should pass `cargo clippy` and have no failing test.
+
+## License
+
+GPLv3. See [`LICENSE`](./LICENSE) for full license.
