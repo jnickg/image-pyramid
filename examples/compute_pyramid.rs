@@ -48,6 +48,10 @@ struct Args {
   /// The scale factor when computing the pyramid. Must be in the range (0, 1)
   #[arg(long, value_name = "FLOAT", default_value = "0.5")]
   scale_factor: Option<f32>,
+
+  /// The size of the kernel to use when computing the pyramid. Must be an odd number
+  #[arg(long, value_name = "UINT", default_value = "3")]
+  kernel_size: Option<u8>,
 }
 
 fn main() {
@@ -68,26 +72,12 @@ fn main() {
     }
   };
   let mut params = ImagePyramidParams::default();
-  params.pyramid_type = if let Some(pyramid_type) = args.pyramid_type {
-    match pyramid_type.to_lowercase().as_str() {
-      "laplacian" | "bandpass" => ImagePyramidType::Bandpass,
-      "gaussian" | "lowpass" => ImagePyramidType::Lowpass,
-      "steerable" => {
-        eprintln!("Steerable pyramid not yet implemented");
-        return;
-      }
-      _ => {
-        eprintln!(
-          "Invalid pyramid type: {}. Defaulting to gaussian (lowpass)",
-          pyramid_type
-        );
-        ImagePyramidType::Lowpass
-      }
-    }
+  let kernel_size = if let Some(kernel_size) = args.kernel_size {
+    kernel_size.into_odd_value().unwrap_or(OddValue::new(3).unwrap())
   } else {
-    ImagePyramidType::Lowpass
+    OddValue::new(3).unwrap()
   };
-  params.smoothing_type = if let Some(smoothing_type) = args.smoothing_type {
+  let smoothing_type = if let Some(smoothing_type) = args.smoothing_type {
     match smoothing_type.to_lowercase().as_str() {
       "gaussian" => SmoothingType::Gaussian,
       "box" => SmoothingType::Box,
@@ -103,6 +93,26 @@ fn main() {
   } else {
     SmoothingType::Gaussian
   };
+  params.pyramid_type = if let Some(pyramid_type) = args.pyramid_type {
+    match pyramid_type.to_lowercase().as_str() {
+      "laplacian" | "bandpass" => ImagePyramidType::Bandpass(smoothing_type(kernel_size)),
+      "gaussian" | "lowpass" => ImagePyramidType::Lowpass(smoothing_type(kernel_size)),
+      "steerable" => {
+        eprintln!("Steerable pyramid not yet implemented");
+        return;
+      }
+      _ => {
+        eprintln!(
+          "Invalid pyramid type: {}. Defaulting to gaussian (lowpass)",
+          pyramid_type
+        );
+        ImagePyramidType::Lowpass(smoothing_type(kernel_size))
+      }
+    }
+  } else {
+    ImagePyramidType::Lowpass(smoothing_type(kernel_size))
+  };
+
   params.scale_factor = if let Some(scale_factor) = args.scale_factor {
     match scale_factor.into_unit_interval() {
       Ok(f) => f,
@@ -122,11 +132,23 @@ fn main() {
     }
   };
 
-  for (l, i) in pyramid.levels.iter().enumerate() {
-    let filename = std::path::Path::new(&args.output).join(format!("L{}.{}", l, image_extension));
-    match i.save(&filename) {
-      Ok(_) => println!("Saved image to {}", filename.to_str().unwrap()),
+  let save_image_and_log = |image: &image::DynamicImage, filename: &str| {
+    match image.save(filename) {
+      Ok(_) => println!("Saved image to {}", filename),
       Err(e) => eprintln!("Error saving image: {}", e),
+    }
+  };
+
+  for (l, level) in pyramid.levels.iter().enumerate() {
+    let filename = std::path::Path::new(&args.output).join(format!("L{}.{}", l, image_extension));
+    match level {
+      ImagePyramidLevel::Single(i) => save_image_and_log(i, filename.to_str().unwrap()),
+      ImagePyramidLevel::Bank(images) => {
+        for (j, i) in images.iter().enumerate() {
+          let filename = std::path::Path::new(&args.output).join(format!("L{}_{}.{}", l, j, image_extension));
+          save_image_and_log(i, filename.to_str().unwrap())
+        }
+      }
     }
   }
 }

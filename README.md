@@ -7,11 +7,30 @@
 
 ## Overview
 
-This is a small Rust crate that facilitates quickly generating an image pyramid from a user-provided image.
+This is a small Rust crate that facilitates quickly generating an image
+pyramid from a user-provided image. It supports
 
-- See [OpenCV: Image Pyramids](https://docs.opencv.org/4.x/dc/dff/tutorial_py_pyramids.html) for an overview of the two most common pyramid types, Lowpass (AKA Gaussian) and Bandpass (AKA Laplacian).
-- The Tomasi paper [Lowpass and Bandpass Pyramids](https://courses.cs.duke.edu/cps274/fall14/notes/Pyramids.pdf) has an authoritative explanation as well.
-- [Wikipedia](https://en.wikipedia.org/wiki/Pyramid_(image_processing)#Steerable_pyramid) has a decent explanation of a steerable pyramid
+- Lowpass pyramids (sometimes called Gaussian pyramids, or just "image pyramids"). These are the basis for mipmaps.
+- Bandpass pyramids (often called Laplacian pyramids)
+- Steerable pyramids, which are explained [here](http://www.cns.nyu.edu/~eero/steerpyr/)
+
+For the lowpass and bandpass pyramids, the user can specify the type of smoothing to use when downsampling the image. The default is a Gaussian filter, but a box filter and triangle filter are also available.
+
+The [`image`](https://crates.io/crates/image) crate is used for image I/O and
+manipulation, and the [`num-traits`](https://crates.io/crates/num-traits) crate
+is used for numeric operations.
+
+## Background
+
+- See [OpenCV: Image Pyramids](https://docs.opencv.org/4.x/dc/dff/tutorial_py_pyramids.html)
+  for an overview of the two most common pyramid types, Lowpass (AKA
+  Gaussian) and Bandpass (AKA Laplacian).
+- The Tomasi paper [Lowpass and Bandpass Pyramids](https://courses.cs.duke.edu/cps274/fall14/notes/Pyramids.pdf)
+  has an authoritative explanation as well.
+- [Wikipedia](https://en.wikipedia.org/wiki/Pyramid_(image_processing)#Steerable_pyramid)
+  has a decent explanation of a steerable pyramid
+- [This NYU Page](http://www.cns.nyu.edu/~eero/steerpyr/) has a good
+ explanation of steerable pyramids
 
 ## Usage
 
@@ -51,6 +70,10 @@ let pyramid = match ImagePyramid::create(&image, Some(&params)) {
 ```
 
 The `scale_factor` field is a `UnitIntervalValue`, which must be in the interval $(0, 1)$. Creating a value of this type yields a `Result` and will contain an error if the value is not valid.
+
+## Building
+
+Use `RUSTDOCFLAGS="--html-in-header katex-header.html" cargo doc --no-deps` to build documentation with LaTeX support. Additionally, see [this repo](https://github.com/paulkernfeld/rustdoc-katex-demo) for more info on shoehorning in LaTeX support.
 
 ## Support
 
