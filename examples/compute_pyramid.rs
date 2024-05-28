@@ -49,9 +49,14 @@ struct Args {
   #[arg(long, value_name = "FLOAT", default_value = "0.5")]
   scale_factor: Option<f32>,
 
-  /// The size of the kernel to use when computing the pyramid. Must be an odd number
+  /// The size of the kernel to use when computing the pyramid. Must be an odd number.
   #[arg(long, value_name = "UINT", default_value = "3")]
   kernel_size: Option<u8>,
+
+  /// The number of orientations to use when computing a steerable pyramid. Only used
+  /// when `pyramid_type` is set to "steerable". If unspecified, defaults to 4.
+  #[arg(long, value_name = "UINT", default_value = "4")]
+  num_orientations: Option<u8>,
 }
 
 fn main() {
@@ -98,8 +103,17 @@ fn main() {
       "laplacian" | "bandpass" => ImagePyramidType::Bandpass(smoothing_type(kernel_size)),
       "gaussian" | "lowpass" => ImagePyramidType::Lowpass(smoothing_type(kernel_size)),
       "steerable" => {
-        eprintln!("Steerable pyramid not yet implemented");
-        return;
+        let orientations = if let Some(orientations) = args.num_orientations {
+          eprintln!("Number of orientations must be specified when using steerable pyramid");
+          NonZeroU8::new(orientations)
+        } else {
+          NonZeroU8::new(4)
+        };
+        let orientations = if let Some(orientations) = orientations { orientations } else {
+          eprintln!("Invalid number of orientations: {}. Defaulting to 4", args.num_orientations.unwrap());
+          return;
+        };
+        ImagePyramidType::Steerable(SteerableParams::new(orientations, kernel_size))
       }
       _ => {
         eprintln!(

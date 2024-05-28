@@ -96,6 +96,59 @@
 //! };
 //! ```
 //!
+//! Next, an example of creating a lowpass pyramid with a custom smoothing
+//! kernel:
+//!
+//! ```rust
+//! use image::DynamicImage;
+//! use image_pyramid::*;
+//!
+//! let image = DynamicImage::new_rgba8(640, 480); // Or load from file
+//!
+//! // This happens to be a Gaussian kernel
+//! let kernel = Kernel::new_normalized(
+//!   &[1.0, 2.0, 1.0, 2.0, 4.0, 2.0, 1.0, 2.0, 1.0],
+//!   kernel_size::THREE,
+//!   kernel_size::THREE,
+//! )
+//! .unwrap();
+//! let params = ImagePyramidParams {
+//!   pyramid_type: ImagePyramidType::Lowpass(SmoothingType::CustomF32(kernel)),
+//!   ..Default::default()
+//! };
+//! let pyramid = match ImagePyramid::create(&image, Some(&params)) {
+//!   Ok(pyramid) => pyramid,
+//!   Err(e) => {
+//!     eprintln!("Error creating image pyramid: {}", e);
+//!     return;
+//!   }
+//! };
+//! ```
+//!
+//! Finally, an example of creating a steerable pyramid:
+//!
+//! ```rust
+//! use image::DynamicImage;
+//! use image_pyramid::*;
+//!
+//! let image = DynamicImage::new_rgba8(640, 480); // Or load from file
+//!
+//! // Four directional filters, with a kernel size of 5, the canonical steerable pyramid.
+//! let steerable_params =
+//!   SteerableParams::new(NonZeroU8::new(4).unwrap(), OddValue::new(5).unwrap());
+//! let params = ImagePyramidParams {
+//!   pyramid_type: ImagePyramidType::Steerable(steerable_params),
+//!   ..Default::default()
+//! };
+//! let pyramid = match ImagePyramid::create(&image, Some(&params)) {
+//!   Ok(pyramid) => pyramid,
+//!   Err(e) => {
+//!     eprintln!("Error creating image pyramid: {}", e);
+//!     return;
+//!   }
+//! };
+//! ```
+//!
 //! [`ImagePyramidParams::scale_factor`] field is a [`UnitIntervalValue`], which
 //! must be a floating-point value in the interval (0, 1). Creating a value of
 //! this type yields a [`Result`] and will contain an error if the value is not
@@ -132,9 +185,10 @@
 extern crate approx;
 
 use std::fmt::Debug;
+pub use std::num::NonZeroU8;
 
 use image::{DynamicImage, GenericImage, GenericImageView, Pixel};
-use num_traits::{clamp, Num, NumCast};
+use num_traits::{clamp, Float, Num, NumCast};
 use thiserror::Error;
 
 /// An enumeration of the errors that may be emitted from the `image_pyramid`
@@ -150,8 +204,8 @@ pub enum ImagePyramidError {
   #[error("Invalid kernel size {0} (expected: odd)")]
   BadKernelSize(u8),
 
-  /// Raised when the user provides an invalid parameter somewhere that a more specific error
-  /// is not available
+  /// Raised when the user provides an invalid parameter somewhere that a more
+  /// specific error is not available
   #[error("Bad parameter: {0}")]
   BadParameter(String),
 
@@ -164,8 +218,8 @@ pub enum ImagePyramidError {
   Internal(String),
 }
 
-/// A container for a value falling on the range (0.0, 1.0) (exclusive, meaning
-/// the values 0.0 and 1.0 are not valid)
+/// A container for a value falling on the range $({0.0}--{1.0})$ (exclusive,
+/// meaning the values $0.0$ and $1.0$ are not valid)
 ///
 /// This is useful for safely defining decreasing scale factors.
 ///
@@ -228,9 +282,35 @@ where
     });
 }
 
+/// A simple 2D convolutional kernel that can be used to filter an image
+///
+/// The kernel is stored in row-major form, and the dimensions are provided
+/// separately.
+///
+/// A kernel can be constructed with [`Kernel::new`], or
+/// [`Kernel::new_normalized`]. These factories ensure the inputs are coherent
+/// and valid, and return an error if they are not. These are most often used
+/// with the [`SmoothingType::CustomF32`] variant, which allows a user-created
+/// kernel to be used for smoothing.
+///
+/// Additional factories exist:
+/// - [`Kernel::new_gaussian`] constructs a Gaussian kernel with the given size
+/// - [`Kernel::new_triangle`] constructs a triangle kernel with the given size
+/// - [`Kernel::new_box`] constructs a box kernel with the given size
+///
+/// However, these are more easily accessed by using the [`SmoothingType`] enum,
+/// and are included mostly for completeness.
+///
+/// The kernel can be used to filter an image with the
+/// [`Kernel::filter_in_place`] and [`Kernel::filter`] methods.
+#[derive(Debug, Clone)]
 pub struct Kernel<K> {
+  /// The elements of the kernel, stored in row-major layout. Its length is
+  /// equal to $width \times height$
   data:   Vec<K>,
+  /// The width of the kernel
   width:  u32,
+  /// The height of the kernel
   height: u32,
 }
 
@@ -244,24 +324,14 @@ impl<K: Num + Copy + Debug> Kernel<K> {
   ///
   /// # Errors
   ///
-  /// - If `width == 0 || height == 0`, [`ImagePyramidError::Internal`] is
-  ///   raised
   /// - If the provided data does not match the size corresponding to the given
-  ///   dimensions
-  ///
-  /// # Panics
-  ///
-  /// In debug builds, this factory panics under the conditions that [`Err`] is
-  /// returned for release builds.
-  pub fn new(data: &[K], width: u32, height: u32) -> Result<Self, ImagePyramidError> {
+  ///   dimensions, [`ImagePyramidError::BadParameter`] is raised
+  pub fn new(data: &[K], width: OddValue, height: OddValue) -> Result<Self, ImagePyramidError> {
     // Take the above asserts and return Internal error when appropriate
-    if width == 0 || height == 0 {
-      return Err(ImagePyramidError::Internal(
-        "width and height must be non-zero".to_string(),
-      ));
-    }
+    let width = width.get() as u32;
+    let height = height.get() as u32;
     if (width * height) as usize != data.len() {
-      return Err(ImagePyramidError::Internal(format!(
+      return Err(ImagePyramidError::BadParameter(format!(
         "Invalid kernel len: expecting {}, found {}",
         width * height,
         data.len()
@@ -279,7 +349,8 @@ impl<K: Num + Copy + Debug> Kernel<K> {
   /// to sum to 1.0. The input slice is in row-major form. For example, a 3x3
   /// matrix with data `[0,1,0,1,2,1,0,1,0`] describes the following matrix:
   ///
-  /// $\begin{bmatrix} 0 & 1 & 0 \\\\ 1 & 2 & 1 \\\\ 0 & 1 & 0 \\\\ \end{bmatrix} / 6$
+  /// $\begin{bmatrix} 0 & 1 & 0 \\\\ 1 & 2 & 1 \\\\ 0 & 1 & 0 \\\\
+  /// \end{bmatrix} / 6$
   ///
   /// ...where `6` is computed dynamically by summing the elements of the
   /// kernel. In other words, all the weights in a normalized kernel sum to
@@ -296,85 +367,145 @@ impl<K: Num + Copy + Debug> Kernel<K> {
   ///
   /// In debug builds, this factory panics under the conditions that [`Err`] is
   /// returned for release builds.
-  pub fn new_normalized(
-    data: &[K],
-    width: u32,
-    height: u32,
-  ) -> Result<Kernel<f32>, ImagePyramidError>
+  pub fn new_normalized<K2>(
+    data: &[K2],
+    width: OddValue,
+    height: OddValue,
+  ) -> Result<Self, ImagePyramidError>
   where
-    K: Into<f32>,
+    K: Float,
+    K2: Num + Copy + Debug + Into<K>,
   {
-    let mut sum = K::zero();
+    let mut sum = K2::zero();
     for i in data {
       sum = sum + *i;
     }
-    let data_norm: Vec<f32> = data
+    let data_norm: Vec<K> = data
       .iter()
-      .map(|x| <K as Into<f32>>::into(*x) / <K as Into<f32>>::into(sum))
+      .map(|x| <K2 as Into<K>>::into(*x) / <K2 as Into<K>>::into(sum))
       .collect();
-    Kernel::<f32>::new(&data_norm, width, height)
+    Self::new(&data_norm, width, height)
   }
 
-  pub(crate) fn new_gaussian(kernel_size: &OddValue) -> Result<Kernel<f32>, ImagePyramidError>
-  where K: From<f32> + Into<f32> {
-    let kernel_size = kernel_size.get() as u32;
-    let mut data = vec![K::zero(); (kernel_size * kernel_size) as usize];
-    let sigma = 0.3f32.mul_add((kernel_size as f32 - 1.0).mul_add(0.5, -1.0), 0.8);
-    for y in 0..kernel_size {
-      for x in 0..kernel_size {
-        let x_f = x as f32 - (kernel_size as f32) / 2.0;
-        let y_f = y as f32 - (kernel_size as f32) / 2.0;
+  /// Creates a Gaussian kernel with the given kernel size.
+  ///
+  /// This is the most common kernel used for smoothing images, when computing
+  /// an image pyramid. The kernel is normalized so that the sum of all elements
+  /// is 1.0, which prevents distortion of the input signal.
+  #[allow(clippy::missing_panics_doc)]
+  #[must_use]
+  pub fn new_gaussian(kernel_size: OddValue) -> Self
+  where K: From<f32> + Into<f32> + Float {
+    let k_size = kernel_size.get() as u32;
+    let mut data = vec![K::zero(); (k_size * k_size) as usize];
+    let sigma = 0.3f32.mul_add((k_size as f32 - 1.0).mul_add(0.5, -1.0), 0.8);
+    for y in 0..k_size {
+      for x in 0..k_size {
+        let x_f = x as f32 - (k_size as f32) / 2.0;
+        let y_f = y as f32 - (k_size as f32) / 2.0;
         let val = sample_gaussian_2d(x_f, y_f, sigma);
-        let idx = (y * kernel_size + x) as usize;
+        let idx = (y * k_size + x) as usize;
         data[idx] = val.into();
       }
     }
-    Self::new_normalized(&data, kernel_size, kernel_size)
+    Self::new_normalized(&data, kernel_size, kernel_size).unwrap()
   }
 
-  pub(crate) fn new_triangle(kernel_size: &OddValue) -> Result<Kernel<f32>, ImagePyramidError>
-  where K: From<f32> + Into<f32> {
-    let kernel_size = kernel_size.get() as u32;
-    let mut data = vec![K::zero(); (kernel_size * kernel_size) as usize];
-    for y in 0..kernel_size {
-      for x in 0..kernel_size {
-        let x_f = x as f32 - (kernel_size as f32) / 2.0;
-        let y_f = y as f32 - (kernel_size as f32) / 2.0;
+  /// Creates a triangle kernel with the given kernel size.
+  ///
+  /// The triangle kernel is a simple kernel where a linear function is used to
+  /// compute weights, where the max value is at $(0,0)$ (the center of the
+  /// kernel).
+  ///
+  /// The results are normalized so that the kernel sums to 1.0, which prevents
+  /// distortion of the input signal.
+  #[allow(clippy::missing_panics_doc)]
+  #[must_use]
+  pub fn new_triangle(kernel_size: OddValue) -> Self
+  where K: From<f32> + Into<f32> + Float {
+    let k_size = kernel_size.get() as u32;
+    let mut data = vec![K::zero(); (k_size * k_size) as usize];
+    for y in 0..k_size {
+      for x in 0..k_size {
+        let x_f = x as f32 - (k_size as f32) / 2.0;
+        let y_f = y as f32 - (k_size as f32) / 2.0;
         let val = sample_triangle_2d(x_f, y_f, 1.0);
-        let idx = (y * kernel_size + x) as usize;
+        let idx = (y * k_size + x) as usize;
         data[idx] = val.into();
       }
     }
-    Self::new_normalized(&data, kernel_size, kernel_size)
+    Self::new_normalized(&data, kernel_size, kernel_size).unwrap()
   }
 
-  pub(crate) fn new_box(kernel_size: &OddValue) -> Result<Kernel<f32>, ImagePyramidError>
-  where K: From<f32> + Into<f32> {
-    let kernel_size = kernel_size.get() as u32;
-    let mut data = vec![K::zero(); (kernel_size * kernel_size) as usize];
-    for y in 0..kernel_size {
-      for x in 0..kernel_size {
+  /// Creates a box kernel with the given kernel size.
+  ///
+  /// The box kernel is a simple kernel where all elements are evenly weighted.
+  /// The results are normalized so that the kernel sums to 1.0, which prevents
+  /// distortion of the input signal.
+  ///
+  /// # Considerations
+  ///
+  /// It should be noted that box kernels are most often used because they can
+  /// be implemented more cheaply than other kernels, such as Gaussian which
+  /// usually requires use of floating-point math. Here, the box kernel also
+  /// uses floating point math, so performance is likely equal to a Gaussian
+  /// kernel.
+  ///
+  /// Instead, it is provided here for  compatibility with common image
+  /// processing expectations, which may require use of a box kernel.
+  #[allow(clippy::missing_panics_doc)]
+  #[must_use]
+  pub fn new_box(kernel_size: OddValue) -> Self
+  where K: From<f32> + Into<f32> + Float {
+    let k_size = kernel_size.get() as u32;
+    let mut data = vec![K::zero(); (k_size * k_size) as usize];
+    for y in 0..k_size {
+      for x in 0..k_size {
         let val = 1.0;
-        let idx = (y * kernel_size + x) as usize;
+        let idx = (y * k_size + x) as usize;
         data[idx] = val.into();
       }
     }
-    Self::new_normalized(&data, kernel_size, kernel_size)
+    Self::new_normalized(&data, kernel_size, kernel_size).unwrap()
   }
 
-  /// Returns 2d correlation of an image. Intermediate calculations are
-  /// performed at type K, and the results converted to pixel Q via f. Pads by
-  /// continuity.
+  /// Computes the 2D correlation of an image and this [`Kernel`] instance.
+  ///
+  /// Intermediate calculations are performed in a container of type $K$, and
+  /// the results converted to pixel $Q$ via $f$. Pads image edges with
+  /// continuity, meaning that the edge pixels are repeated to fill the
+  /// kernel.
+  ///
+  /// # Safety
+  ///
+  /// This function is written to compute results quickly, so the inner loop
+  /// contains an `unsafe` block that does not perform any bounds checking.
+  /// Instead, the parameters of the loop are checked prior to entering the
+  /// loop. This is safe because the loop parameters are derived from the image
+  /// dimensions and kernel size.
+  ///
+  /// # Errors
+  ///
+  /// - If any of the image dimensions zero, [`ImagePyramidError::BadParameter`]
+  ///   is raised.
   #[allow(unsafe_code)]
   #[allow(unused)]
-  pub fn filter_in_place<I, F>(&self, image: &mut I, mut f: F)
+  pub fn filter_in_place<I, F>(&self, image: &mut I, mut f: F) -> Result<(), ImagePyramidError>
   where
     I: GenericImage + Clone,
     <<I as GenericImageView>::Pixel as Pixel>::Subpixel: Into<K>,
     F: FnMut(&mut <<I as GenericImageView>::Pixel as Pixel>::Subpixel, K),
   {
     use core::cmp::{max, min};
+
     let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+      return Err(ImagePyramidError::BadParameter(format!(
+        "Image dimensions ({}, {}) are too small for kernel dimensions ({}, {})",
+        width, height, self.width, self.height
+      )));
+    }
+
     let num_channels = <<I as GenericImageView>::Pixel as Pixel>::CHANNEL_COUNT as usize;
     let zero = K::zero();
     let mut acc = vec![zero; num_channels];
@@ -419,6 +550,24 @@ impl<K: Num + Copy + Debug> Kernel<K> {
         image.put_pixel(x_u32, y_u32, out_pel);
       }
     }
+    Ok(())
+  }
+
+  /// Filters an image with this kernel, returning the result as a new image.
+  ///
+  /// See [`Kernel::filter_in_place`] for more information on filtering.
+  ///
+  /// # Errors
+  /// - Whenever [`Kernel::filter_in_place`] yields an error.
+  pub fn filter<I, F>(&self, image: &I, f: F) -> Result<I, ImagePyramidError>
+  where
+    I: GenericImage + Clone,
+    <<I as GenericImageView>::Pixel as Pixel>::Subpixel: Into<K>,
+    F: FnMut(&mut <<I as GenericImageView>::Pixel as Pixel>::Subpixel, K),
+  {
+    let mut image = image.clone();
+    self.filter_in_place(&mut image, f)?;
+    Ok(image)
   }
 }
 
@@ -430,20 +579,45 @@ pub struct ImageToProcess<'a>(pub &'a DynamicImage);
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum SmoothingType {
-  /// Use a Gaussian filter
+  /// Use a Gaussian kernel for smoothing, with the given kernel size.
   Gaussian(OddValue),
-  /// Use a linear box filter
+  /// Use a linear box filter for smoothing, with the given kernel size.
   Box(OddValue),
-  /// Use a linear triangle filter:
+  /// Use a linear triangle filter for smoothing, with the given kernel size.
   Triangle(OddValue),
+  /// Use a custom kernel for smoothing, defined by the user.
+  ///
+  /// User is responsible for ensuring the kernel produces coherent results.
+  CustomF32(Kernel<f32>),
 }
 
 /// A value that is guaranteed to be odd
 ///
 /// This is useful for kernel sizes, which must be odd to have a well-defined
 /// center
-#[derive(Debug, Clone)]
-pub struct OddValue(pub(crate)u8);
+#[derive(Debug, Clone, Copy)]
+pub struct OddValue(u8);
+
+/// A set of constants for common kernel sizes. Most often
+/// [`DEFAULT_KERNEL_SIZE`] is the best choice, but these are provided for ease
+/// of use in the case that non-default values are needed.
+pub mod kernel_size {
+  use super::OddValue;
+
+  pub const THREE: OddValue = OddValue(3);
+  pub const FIVE: OddValue = OddValue(5);
+  pub const SEVEN: OddValue = OddValue(7);
+  pub const NINE: OddValue = OddValue(9);
+  pub const ELEVEN: OddValue = OddValue(11);
+}
+
+/// The default kernel size. Users can pass this value wherever an [`OddValue`]
+/// is required, if they don't want to specify a kernel size.
+pub const DEFAULT_KERNEL_SIZE: OddValue = kernel_size::THREE;
+
+/// The default kernel size for steerable pyramids. This is the most common
+/// value used in practice.
+pub const DEFAULT_STEERABLE_KERNEL_SIZE: OddValue = kernel_size::FIVE;
 
 impl OddValue {
   /// Attempts to create a new instance from the provided value
@@ -459,8 +633,18 @@ impl OddValue {
     }
   }
 
+  /// Creates a new instance without checking if the value is odd
+  ///
+  /// # Safety
+  /// - The value must be odd, as internal implementation in the `image-pyramid`
+  ///   crate makes this assumption.
+  #[allow(unsafe_code)]
   #[must_use]
-  pub const fn get(&self) -> u8 { self.0 }
+  pub const unsafe fn new_unchecked(val: u8) -> Self { Self(val) }
+
+  /// Retrieves the guaranteed odd value for use in computation.
+  #[must_use]
+  pub const fn get(self) -> u8 { self.0 }
 }
 
 /// A trait describing some integer type that can be converted to an odd value.
@@ -524,19 +708,29 @@ pub struct SteerableParams {
   /// compute, each rotated by an angle of `360 / num_orientations` degrees
   /// using the formulas above.
   ///
-  /// The default value is `4`, which is the most common value used in practice.
-  pub num_orientations: u8,
+  /// The default value is defined by [`DEFAULT_STEERABLE_NUM_ORIENTATIONS`].
+  pub num_orientations: NonZeroU8,
 
   /// The size of the kernel to use for each filter. This is the size of the
   /// kernel in both the x and y directions.
+  ///
+  /// The default value is defined by [`DEFAULT_STEERABLE_KERNEL_SIZE`].
   pub kernel_size: OddValue,
 }
 
+/// The four cardinal orientations (0, 90, 180, 270 degrees).
+#[allow(unsafe_code)]
+pub const DEFAULT_STEERABLE_NUM_ORIENTATIONS: NonZeroU8 = unsafe { NonZeroU8::new_unchecked(4) };
+
+/// The default set of parameters for computing steerable pyramids.
+///
+/// This is the most common set of parameters used in practice, and thus a
+/// useful default for users who don't need to customize the parameters.
 impl Default for SteerableParams {
   fn default() -> Self {
     Self {
-      num_orientations: 4,
-      kernel_size:      OddValue(5),
+      num_orientations: DEFAULT_STEERABLE_NUM_ORIENTATIONS,
+      kernel_size:      DEFAULT_STEERABLE_KERNEL_SIZE,
     }
   }
 }
@@ -568,8 +762,11 @@ pub(crate) fn sample_gaussian_2d_derivative_y(x: f32, y: f32, sigma: f32) -> f32
 }
 
 impl SteerableParams {
+  /// Creates a new instance of [`SteerableParams`] with the given values.
+  ///
+  /// No additional checking is used beyond what the types themselves enforce.
   #[must_use]
-  pub const fn new(num_orientations: u8, kernel_size: OddValue) -> Self {
+  pub const fn new(num_orientations: NonZeroU8, kernel_size: OddValue) -> Self {
     Self {
       num_orientations,
       kernel_size,
@@ -583,8 +780,8 @@ impl SteerableParams {
   /// basis filters, and then computes each steerable filter as a linear
   /// combination of the two basis filters.
   pub(crate) fn get_kernels(&self) -> Vec<Kernel<f32>> {
-    let angles: Vec<f32> = (0..self.num_orientations)
-      .map(|i| (i as f32) * 180.0 / (self.num_orientations as f32))
+    let angles: Vec<f32> = (0..self.num_orientations.get())
+      .map(|i| (i as f32) * 180.0 / (self.num_orientations.get() as f32))
       .collect();
 
     angles
@@ -605,8 +802,8 @@ impl SteerableParams {
               })
             })
             .collect::<Vec<f32>>(),
-          self.kernel_size.get() as u32,
-          self.kernel_size.get() as u32,
+          self.kernel_size,
+          self.kernel_size,
         )
         .unwrap()
       })
@@ -655,18 +852,28 @@ impl Default for ImagePyramidParams {
   fn default() -> Self {
     Self {
       scale_factor: UnitIntervalValue::new(0.5).unwrap(),
-      pyramid_type: ImagePyramidType::Lowpass(SmoothingType::Gaussian(OddValue(3))),
+      pyramid_type: ImagePyramidType::Lowpass(SmoothingType::Gaussian(kernel_size::THREE)),
     }
   }
 }
 
 impl ImagePyramidParams {
+  /// Gets the [`SmoothingType`] to use when computing a lowpass pyramid with
+  /// the current parameters.
+  ///
+  /// # Notes
+  /// - If the pyramid type is [`ImagePyramidType::Steerable`], this will return
+  ///   a Gaussian kernel with a kernel size of 3. While this is what is used to
+  ///   compute the lowpass portion of a steerable pyramid, it does _not_
+  ///   describe the Derivative of Gaussian kernels, which are dynamically
+  ///   computed, used when computing the bandpass portion of a steerable
+  ///   pyramid
   #[must_use]
-  pub fn get_smoothing_type(&self) -> SmoothingType {
+  pub fn get_lowpass_smoothing_type(&self) -> SmoothingType {
     match &self.pyramid_type {
       ImagePyramidType::Lowpass(smoothing_type) | ImagePyramidType::Bandpass(smoothing_type) =>
         smoothing_type.clone(),
-      ImagePyramidType::Steerable(_) => SmoothingType::Gaussian(OddValue(3)),
+      ImagePyramidType::Steerable(_) => SmoothingType::Gaussian(kernel_size::THREE),
     }
   }
 }
@@ -743,12 +950,8 @@ pub trait CanComputePyramid {
   /// If no parameters are passed, the default parameters will be used.
   ///
   /// # Errors
-  /// Errors of type [`ImagePyramidError::NotImplemented`] are raised for the
-  /// following parameter values, which are not yet implemented:
-  ///
-  /// - [`SmoothingType::Box`] - This smoothing type is not yet supported in the
-  ///   `image` crate and is also not yet implemented manually
-  /// - [`ImagePyramidType::Steerable`] - Not yet implemented
+  /// - Errors of type [`ImagePyramidError`] are raised if the image pyramid
+  ///   cannot be computed for some reason.
   fn compute_image_pyramid(
     &self,
     params: Option<&ImagePyramidParams>,
@@ -767,18 +970,19 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
       params: &ImagePyramidParams,
     ) -> Result<Vec<DynamicImage>, ImagePyramidError> {
       let mut levels = vec![image.clone()];
-      let smoothing_type = params.get_smoothing_type();
+      let smoothing_type = params.get_lowpass_smoothing_type();
       let kernel = match smoothing_type {
-        SmoothingType::Gaussian(k) => Kernel::<f32>::new_gaussian(&k)?,
-        SmoothingType::Box(k) => Kernel::<f32>::new_box(&k)?,
-        SmoothingType::Triangle(k) => Kernel::<f32>::new_triangle(&k)?,
+        SmoothingType::Gaussian(k) => Kernel::<f32>::new_gaussian(k),
+        SmoothingType::Box(k) => Kernel::<f32>::new_box(k),
+        SmoothingType::Triangle(k) => Kernel::<f32>::new_triangle(k),
+        SmoothingType::CustomF32(k) => k,
       };
       let mut current_level = image.clone();
       #[allow(clippy::cast_possible_truncation)]
       #[allow(clippy::cast_precision_loss)]
       #[allow(clippy::cast_sign_loss)]
       while current_level.width() > 1 && current_level.height() > 1 {
-        kernel.filter_in_place(&mut current_level, |c, a| *c = a as u8);
+        kernel.filter_in_place(&mut current_level, |c, a| *c = a as u8)?;
         current_level = current_level.resize_exact(
           (current_level.width() as f32 * params.scale_factor.get()) as u32,
           (current_level.height() as f32 * params.scale_factor.get()) as u32,
@@ -838,9 +1042,9 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
         // First, we need a lowpass pyramid to work with.
         let mut levels = compute_lowpass_pyramid(self.0, &params)?;
 
-        // For each index N, upscale the resolution N+1 to match N's resolution.
-        // Then we compute the pixel-wise difference between them, and
-        // store the result in the current level
+        // For each index $i$, upscale the resolution of pyramid level $L_{i+1}$ to
+        // match the resolution of pyramid level $L_i$. Then we compute the pixel-wise
+        // difference between them, and store the result in the current level.
         for i in 0..levels.len() - 1 {
           let next_level = levels[i + 1].resize_exact(
             levels[i].width(),
@@ -871,7 +1075,7 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
 mod tests {
   use test_case::{test_case, test_matrix};
 
-  use super::*;
+  use super::{kernel_size::*, *};
 
   #[test_case(0.0, 1.0, 0.3989423)]
   #[test_case(1.0, 1.0, 0.24197073)]
@@ -898,21 +1102,38 @@ mod tests {
         i += 1;
       }
     }
-    let kernel = Kernel::new_normalized(&[1u8, 2, 1, 2, 4, 2, 1, 2, 1], 3, 3).unwrap();
-    kernel.filter_in_place(&mut image, |c, a| *c = a as u8);
+    let kernel =
+      Kernel::<f32>::new_normalized(&[1u8, 2, 1, 2, 4, 2, 1, 2, 1], THREE, THREE).unwrap();
+    let result = kernel.filter_in_place(&mut image, |c, a| *c = a as u8);
+    assert!(result.is_ok());
     assert_eq!(image.get_pixel(1, 1), image::Rgba::<u8>([4, 4, 4, 255]));
   }
 
   #[test]
   fn kernel_new_error_when_dims_do_not_match_data() {
-    let k = Kernel::new(&[1u8, 2, 3, 4, 5], 2, 2);
+    let k = Kernel::new(&[1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10], THREE, THREE);
     assert!(k.is_err());
   }
 
-  #[test]
-  fn kernel_new_error_when_dims_are_zero() {
-    let k = Kernel::new(&[1u8, 2, 3, 4, 5], 0, 0);
-    assert!(k.is_err());
+  #[test_matrix([1, 3, 5, 7, 9, 11, 13, 15, 17, 19])]
+  fn kernel_new_gaussian_never_fails(kernel_size: u8) {
+    let k_size = OddValue::new(kernel_size);
+    assert!(k_size.is_ok());
+    let _ = Kernel::<f32>::new_gaussian(k_size.unwrap());
+  }
+
+  #[test_matrix([1, 3, 5, 7, 9, 11, 13, 15, 17, 19])]
+  fn kernel_new_triangle_never_fails(kernel_size: u8) {
+    let k_size = OddValue::new(kernel_size);
+    assert!(k_size.is_ok());
+    let _ = Kernel::<f32>::new_triangle(k_size.unwrap());
+  }
+
+  #[test_matrix([1, 3, 5, 7, 9, 11, 13, 15, 17, 19])]
+  fn kernel_new_box_never_fails(kernel_size: u8) {
+    let k_size = OddValue::new(kernel_size);
+    assert!(k_size.is_ok());
+    let _ = Kernel::<f32>::new_box(k_size.unwrap());
   }
 
   #[test]
@@ -931,12 +1152,12 @@ mod tests {
 
   #[test_matrix(
     [
-      ImagePyramidType::Lowpass(SmoothingType::Box(OddValue::new(3).unwrap())),
-      ImagePyramidType::Lowpass(SmoothingType::Gaussian(OddValue::new(3).unwrap())),
-      ImagePyramidType::Lowpass(SmoothingType::Triangle(OddValue::new(3).unwrap())),
-      ImagePyramidType::Bandpass(SmoothingType::Box(OddValue::new(3).unwrap())),
-      ImagePyramidType::Bandpass(SmoothingType::Gaussian(OddValue::new(3).unwrap())),
-      ImagePyramidType::Bandpass(SmoothingType::Triangle(OddValue::new(3).unwrap()))
+      ImagePyramidType::Lowpass(SmoothingType::Box(THREE)),
+      ImagePyramidType::Lowpass(SmoothingType::Gaussian(THREE)),
+      ImagePyramidType::Lowpass(SmoothingType::Triangle(THREE)),
+      ImagePyramidType::Bandpass(SmoothingType::Box(THREE)),
+      ImagePyramidType::Bandpass(SmoothingType::Gaussian(THREE)),
+      ImagePyramidType::Bandpass(SmoothingType::Triangle(THREE))
     ],
     [
       DynamicImage::new_luma16(128, 128),
@@ -986,7 +1207,7 @@ mod tests {
 
   #[test]
   fn steerable_params_get_kernels() {
-    let params = SteerableParams::new(4, 5.into_odd_value().unwrap());
+    let params = SteerableParams::new(NonZeroU8::new(4).unwrap(), OddValue::new(5).unwrap());
     let kernels = params.get_kernels();
     assert_eq!(kernels.len(), 4);
     assert_eq!(kernels[0].width, 5);
