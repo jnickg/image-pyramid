@@ -16,12 +16,11 @@ categories = ["computer-vision", "algorithms", "graphics", "multimedia", "multim
 
 [dependencies]
 image = { version = "0.25.1", features = ["rayon"], default-features = false }
-imageproc = "0.25.0"
 num-traits = "0.2.19"
-rayon = "1.10.0"
 thiserror = "1.0.61"
 
 [dev-dependencies]
+anyhow = "1.0.86"
 approx = "0.5.1"
 clap = { version = "4.5.4", features = ["derive"] }
 image = "0.25.1"

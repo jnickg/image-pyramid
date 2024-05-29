@@ -307,11 +307,11 @@ where
 pub struct Kernel<K> {
   /// The elements of the kernel, stored in row-major layout. Its length is
   /// equal to $width \times height$
-  data:   Vec<K>,
+  pub data:   Vec<K>,
   /// The width of the kernel
-  width:  u32,
+  pub width:  u32,
   /// The height of the kernel
-  height: u32,
+  pub height: u32,
 }
 
 impl<K: Num + Copy + Debug> Kernel<K> {
@@ -773,15 +773,30 @@ impl SteerableParams {
     }
   }
 
-  /// This takes the number of orientations and computes the first-order
-  /// derivative-of-Gaussian kernels for each orientation.
+  /// Creates a new instance of [`SteerableParams`] with the given values.
   ///
-  /// It starts by computing the angles for each filter, then creates the two
-  /// basis filters, and then computes each steerable filter as a linear
-  /// combination of the two basis filters.
-  pub(crate) fn get_kernels(&self) -> Vec<Kernel<f32>> {
+  /// This is a convenience method that checks the values to ensure they are
+  /// valid. If they are not, an error is returned.
+  ///
+  /// Consider using [`SteerableParams::new`] for type-level protection of
+  /// values.
+  ///
+  /// # Errors
+  ///
+  /// - If `num_orientations` is zero
+  /// - If `kernel_size` is not odd
+  pub fn from_primitives(num_orientations: u8, kernel_size: u8) -> Result<Self, ImagePyramidError> {
+    Ok(Self {
+      num_orientations: NonZeroU8::new(num_orientations).ok_or_else(|| {
+        ImagePyramidError::BadParameter("num_orientations must be non-zero".to_string())
+      })?,
+      kernel_size:      OddValue::new(kernel_size)?,
+    })
+  }
+
+  pub fn get_kernels_with_sigma(&self, sigma: f32) -> Vec<Kernel<f32>> {
     let angles: Vec<f32> = (0..self.num_orientations.get())
-      .map(|i| (i as f32) * 180.0 / (self.num_orientations.get() as f32))
+      .map(|i| (i as f32) * 360.0 / (self.num_orientations.get() as f32))
       .collect();
 
     angles
@@ -796,8 +811,8 @@ impl SteerableParams {
                 let y_f = y as f32 - (self.kernel_size.get() as f32) / 2.0;
                 let cos = angle_rad.cos();
                 let sin = angle_rad.sin();
-                let g0_1 = sample_gaussian_2d_derivative_x(x_f, y_f, 1.0);
-                let g90_1 = sample_gaussian_2d_derivative_y(x_f, y_f, 1.0);
+                let g0_1 = sample_gaussian_2d_derivative_x(x_f, y_f, sigma);
+                let g90_1 = sample_gaussian_2d_derivative_y(x_f, y_f, sigma);
                 g0_1.mul_add(cos, g90_1 * sin)
               })
             })
@@ -809,6 +824,14 @@ impl SteerableParams {
       })
       .collect()
   }
+
+  /// This takes the number of orientations and computes the first-order
+  /// derivative-of-Gaussian kernels for each orientation.
+  ///
+  /// It starts by computing the angles for each filter, then creates the two
+  /// basis filters, and then computes each steerable filter as a linear
+  /// combination of the two basis filters.
+  pub fn get_kernels(&self) -> Vec<Kernel<f32>> { self.get_kernels_with_sigma(1.0) }
 }
 
 /// What type of pyramid to compute. Each has different properties,
