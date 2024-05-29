@@ -828,55 +828,12 @@ pub(crate) fn sample_gaussian_2d(x: f32, y: f32, sigma: f32) -> f32 {
   sample_gaussian_1d(x, sigma) * sample_gaussian_1d(y, sigma)
 }
 
-pub(crate) fn _sample_gaussian_1d_derivative(x: f32, sigma: f32) -> f32 {
-  -x * sample_gaussian_1d(x, sigma) / sigma.powi(2)
+pub(crate) fn sample_gaussian_1d_deriv(x: f32, sigma: f32, order: u8) -> f32 {
+  (factorial(order as i128) as f32).recip() / (sigma.powi(order as i32) * std::f32::consts::PI)
+    * (x.powi(order as i32) / sigma.powi(order as i32)).exp()
 }
 
-pub(crate) fn _sample_gaussian_1d_second_derivative(x: f32, sigma: f32) -> f32 {
-  (x.powi(2) / sigma.powi(2) - 1.0) * sample_gaussian_1d(x, sigma) / sigma.powi(2)
-}
-
-pub(crate) fn _sample_gaussian_1d_third_derivative(x: f32, sigma: f32) -> f32 {
-  (3.0 - x.powi(2) / sigma.powi(2)) * x * sample_gaussian_1d(x, sigma) / sigma.powi(3)
-}
-
-pub(crate) fn _sample_gaussian_1d_fourth_derivative(x: f32, sigma: f32) -> f32 {
-  (x.powi(4) / sigma.powi(4) - 6.0 * x.powi(2) / sigma.powi(2) + 3.0) * sample_gaussian_1d(x, sigma)
-    / sigma.powi(4)
-}
-
-pub(crate) fn _sample_gaussian_2d_derivative_x(x: f32, y: f32, sigma: f32) -> f32 {
-  _sample_gaussian_1d_derivative(x, sigma) * sample_gaussian_1d(y, sigma)
-}
-
-pub(crate) fn _sample_gaussian_2d_derivative_y(x: f32, y: f32, sigma: f32) -> f32 {
-  sample_gaussian_1d(x, sigma) * _sample_gaussian_1d_derivative(y, sigma)
-}
-
-pub(crate) fn _sample_gaussian_kth_order_derivative(x: f32, sigma: f32, k: u8) -> f32 {
-  (_factorial(k as i128) as f32).recip() / (sigma.powi(k as i32) * std::f32::consts::PI)
-    * (x.powi(k as i32) / sigma.powi(k as i32)).exp()
-}
-
-pub(crate) fn _sample_2d_gaussian_kth_order_derivative_with_respect_to_x(
-  x: f32,
-  y: f32,
-  sigma: f32,
-  k: u8,
-) -> f32 {
-  _sample_gaussian_kth_order_derivative(x, sigma, k) * sample_gaussian_1d(y, sigma)
-}
-
-pub(crate) fn _sample_2d_gaussian_kth_order_derivative_with_respect_to_y(
-  x: f32,
-  y: f32,
-  sigma: f32,
-  k: u8,
-) -> f32 {
-  sample_gaussian_1d(x, sigma) * _sample_gaussian_kth_order_derivative(y, sigma, k)
-}
-
-pub(crate) fn _factorial(number: i128) -> i128 {
+pub(crate) fn factorial(number: i128) -> i128 {
   let mut factorial: i128 = 1;
   for i in 1..=number {
     factorial *= i;
@@ -934,28 +891,26 @@ impl SteerableParams {
     let kernel_size = self.kernel_size.get();
     let k_size_f32 = self.kernel_size.get() as f32;
     let k_idx_offset = k_size_f32 / 2.0 - 0.5;
-    let order = self.num_orientations.get() - 1;
+    let _order = self.num_orientations.get() - 1;
     // dbg!((kernel_size, k_idx_offset, order));
 
-    let mut basis_x = Vec::with_capacity((kernel_size * kernel_size) as usize);
+    let mut basis_x = Vec::with_capacity(kernel_size as usize * kernel_size as usize);
     for y in 0..kernel_size as i32 {
       for x in 0..kernel_size as i32 {
         let x_f = x as f32 - k_idx_offset;
         let y_f = y as f32 - k_idx_offset;
-        let val =
-          _sample_2d_gaussian_kth_order_derivative_with_respect_to_x(x_f, y_f, sigma, order);
+        let val = sample_gaussian_1d_deriv(x_f, sigma, 1) * sample_gaussian_1d(y_f, sigma);
         // dbg!((x, x_f, y, y_f, val));
         basis_x.push(val);
       }
     }
 
-    let mut basis_y = Vec::with_capacity((kernel_size * kernel_size) as usize);
+    let mut basis_y = Vec::with_capacity(kernel_size as usize * kernel_size as usize);
     for y in 0..kernel_size as i32 {
       for x in 0..kernel_size as i32 {
         let x_f = x as f32 - k_idx_offset;
         let y_f = y as f32 - k_idx_offset;
-        let val =
-          _sample_2d_gaussian_kth_order_derivative_with_respect_to_y(x_f, y_f, sigma, order);
+        let val = sample_gaussian_1d(x_f, sigma) * sample_gaussian_1d_deriv(y_f, sigma, 1);
         // dbg!((x, x_f, y, y_f, val));
         basis_y.push(val);
       }
@@ -970,7 +925,7 @@ impl SteerableParams {
     Ok((basis_x, basis_y))
   }
 
-  /// Determines an appropriate $\sigma$ value for the given kernel size.
+  /// Determines an appropriate $\sigma$ (standard deviation) value for the given kernel size.
   ///
   /// As a convention, this is one third of the kernel size.
   #[must_use]

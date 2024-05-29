@@ -40,28 +40,27 @@ struct Args {
   #[arg(long, value_name = "UINT", default_value = "4")]
   num_orientations: u8,
 
-  /// The standard deviation to use when sampling the Gaussian function.
-  #[arg(long, value_name = "FLOAT", default_value = "1.0")]
-  sigma: f32,
-
   /// Whether to include the basis kernels in the output
   #[arg(long, action)]
   include_basis: bool,
 }
 
 fn save_kernel_as_image(kernel: &Kernel<f32>, path: &str) -> Result<()> {
-  let kernel_data_u16 = kernel
-    .data
+  // first, normalize the kernel data so that its max value is 1.0 and min value is 0.0
+  let max_value = kernel.data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+  let min_value = kernel.data.iter().cloned().fold(f32::INFINITY, f32::min);
+  let kernel_data_normalized: Vec<f32> = kernel.data.iter().map(|&x| (x - min_value) / (max_value - min_value)).collect();
+  let kernel_data_u8 = kernel_data_normalized
     .iter()
     .map(|&x| {
       let x = x as f32;
-      let x = (x / 2.0 + 0.5) * 65535.0;
-      x as u16
+      let x = x * 255.0;
+      x as u8
     })
     .collect();
   let kernel_buffer =
-    ImageBuffer::from_raw(kernel.width as u32, kernel.height as u32, kernel_data_u16).unwrap();
-  let kernel_image = DynamicImage::ImageLuma16(kernel_buffer);
+    ImageBuffer::from_raw(kernel.width as u32, kernel.height as u32, kernel_data_u8).unwrap();
+  let kernel_image = DynamicImage::ImageLuma8(kernel_buffer);
   kernel_image.save(path)?;
   Ok(())
 }
@@ -72,7 +71,6 @@ fn main() -> Result<()> {
 
   let kernel_size = args.kernel_size;
   let num_orientations = args.num_orientations;
-  let sigma = args.sigma;
 
   let steerable_params = SteerableParams {
     kernel_size:      OddValue::new(kernel_size)?,
@@ -81,14 +79,14 @@ fn main() -> Result<()> {
   };
 
   if args.include_basis {
-    let (basis_x, basis_y) = steerable_params.get_basis_kernels_with_sigma(sigma)?;
+    let (basis_x, basis_y) = steerable_params.get_basis_kernels()?;
     dbg!(&basis_x);
     dbg!(&basis_y);
     save_kernel_as_image(&basis_x, &format!("{}/basis_kernel_x.png", args.output))?;
     save_kernel_as_image(&basis_y, &format!("{}/basis_kernel_y.png", args.output))?;
   }
 
-  let kernels = steerable_params.get_kernels_with_sigma(sigma);
+  let kernels = steerable_params.get_kernels()?;
   for (i, kernel) in kernels.iter().enumerate() {
     dbg!(&kernel);
     let kernel_path = format!("{}/kernel_{}.png", args.output, i);
