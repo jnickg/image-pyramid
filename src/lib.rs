@@ -1072,14 +1072,15 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 mod tests {
   use test_case::{test_case, test_matrix};
 
   use super::{kernel_size::*, *};
 
-  #[test_case(0.0, 1.0, 0.3989423)]
-  #[test_case(1.0, 1.0, 0.24197073)]
-  #[test_case(2.0, 1.0, 0.05399097)]
+  #[test_case(0.0, 1.0, 0.398_942_3)]
+  #[test_case(1.0, 1.0, 0.241_970_73)]
+  #[test_case(2.0, 1.0, 0.053_990_97)]
   fn sample_gaussian_1d_produces_expected_result(x: f32, sigma: f32, expected: f32) {
     let y = sample_gaussian_1d(x, sigma);
     assert_relative_eq!(y, expected, epsilon = 1e-6);
@@ -1152,28 +1153,28 @@ mod tests {
 
   #[test_matrix(
     [
-      ImagePyramidType::Lowpass(SmoothingType::Box(THREE)),
-      ImagePyramidType::Lowpass(SmoothingType::Gaussian(THREE)),
-      ImagePyramidType::Lowpass(SmoothingType::Triangle(THREE)),
-      ImagePyramidType::Bandpass(SmoothingType::Box(THREE)),
-      ImagePyramidType::Bandpass(SmoothingType::Gaussian(THREE)),
-      ImagePyramidType::Bandpass(SmoothingType::Triangle(THREE))
+      &ImagePyramidType::Lowpass(SmoothingType::Box(THREE)),
+      &ImagePyramidType::Lowpass(SmoothingType::Gaussian(THREE)),
+      &ImagePyramidType::Lowpass(SmoothingType::Triangle(THREE)),
+      &ImagePyramidType::Bandpass(SmoothingType::Box(THREE)),
+      &ImagePyramidType::Bandpass(SmoothingType::Gaussian(THREE)),
+      &ImagePyramidType::Bandpass(SmoothingType::Triangle(THREE))
     ],
     [
-      DynamicImage::new_luma16(128, 128),
-      DynamicImage::new_luma8(128, 128),
-      DynamicImage::new_luma_a16(128, 128),
-      DynamicImage::new_luma_a8(128, 128),
-      DynamicImage::new_rgb16(128, 128),
-      DynamicImage::new_rgb8(128, 128),
-      DynamicImage::new_rgb32f(128, 128),
-      DynamicImage::new_rgba16(128, 128),
-      DynamicImage::new_rgba8(128, 128),
-      DynamicImage::new_rgba32f(128, 128)
+      &DynamicImage::new_luma16(128, 128),
+      &DynamicImage::new_luma8(128, 128),
+      &DynamicImage::new_luma_a16(128, 128),
+      &DynamicImage::new_luma_a8(128, 128),
+      &DynamicImage::new_rgb16(128, 128),
+      &DynamicImage::new_rgb8(128, 128),
+      &DynamicImage::new_rgb32f(128, 128),
+      &DynamicImage::new_rgba16(128, 128),
+      &DynamicImage::new_rgba8(128, 128),
+      &DynamicImage::new_rgba32f(128, 128)
     ]
   )]
-  fn compute_image_pyramid(pyramid_type: ImagePyramidType, image: DynamicImage) {
-    let ipr = ImageToProcess(&image);
+  fn compute_image_pyramid(pyramid_type: &ImagePyramidType, image: &DynamicImage) {
+    let ipr = ImageToProcess(image);
 
     let params = ImagePyramidParams {
       pyramid_type: pyramid_type.clone(),
@@ -1188,9 +1189,9 @@ mod tests {
 
   #[test]
   fn into_unit_interval_f32() {
-    let i = 0.5f32.into_unit_interval();
+    let i = 0.5.into_unit_interval();
     assert!(i.is_ok());
-    assert_eq!(0.5f32, i.unwrap().get());
+    assert_relative_eq!(0.5, i.unwrap().get());
   }
 
   #[test]
