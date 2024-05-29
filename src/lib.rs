@@ -588,6 +588,21 @@ pub enum SmoothingType {
   /// Use a custom kernel for smoothing, defined by the user.
   ///
   /// User is responsible for ensuring the kernel produces coherent results.
+  /// Generally, the kernel should have the following properties:
+  ///
+  /// - Normal ($\sum w_i = 1$): The sum of all elements in the kernel should be
+  ///   1.0, to prevent distortion
+  /// - Symmetric ($w_i = w_{-i}$): The kernel should be unbiased, meaning the
+  ///   weights are symmetric about its center
+  /// - Unimodal ($w_i \ge w_j \forall 0 < i < j$): The kernel should have a
+  ///   single peak, meaning the weights are highest at the center and decrease
+  ///   monotonically as distance from the center increases
+  /// - Finite: The kernel should have a finite support, meaning the weights are
+  ///   zero (or approach zero / discretize to zero) outside a certain radius
+  ///   from the center. For example, a Gaussian kernel has infinite support,
+  ///   but is often truncated to a finite size.
+  /// - Size: The kernel should have an odd size, to ensure a well-defined
+  ///   center
   CustomF32(Kernel<f32>),
 }
 
@@ -761,6 +776,14 @@ pub(crate) fn sample_gaussian_2d_derivative_y(x: f32, y: f32, sigma: f32) -> f32
   sample_gaussian_1d(x, sigma) * sample_gaussian_1d_derivative(y, sigma)
 }
 
+pub(crate) fn factorial(number: i128) -> i128 {
+  let mut factorial: i128 = 1;
+  for i in 1..(number + 1) {
+    factorial *= i;
+  }
+  return factorial;
+}
+
 impl SteerableParams {
   /// Creates a new instance of [`SteerableParams`] with the given values.
   ///
@@ -795,9 +818,18 @@ impl SteerableParams {
   }
 
   pub fn get_kernels_with_sigma(&self, sigma: f32) -> Vec<Kernel<f32>> {
+    let order = self.num_orientations.get() - 1;
+
+    let constant = 2.0f32.powi(2 * order as i32) * factorial(order as i128).pow(2) as f32
+      / (self.num_orientations.get() as f32 * factorial(2 * order as i128) as f32);
+
     let angles: Vec<f32> = (0..self.num_orientations.get())
-      .map(|i| (i as f32) * 360.0 / (self.num_orientations.get() as f32))
+      .map(|i| (i as f32) * 180.0 / (self.num_orientations.get() as f32))
       .collect();
+
+    // angles.iter().map(|angle| {
+    //   let angle_rad = angle.to_radians();
+    // }).collect()
 
     angles
       .iter()
@@ -995,9 +1027,9 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
       let mut levels = vec![image.clone()];
       let smoothing_type = params.get_lowpass_smoothing_type();
       let kernel = match smoothing_type {
-        SmoothingType::Gaussian(k) => Kernel::<f32>::new_gaussian(k),
-        SmoothingType::Box(k) => Kernel::<f32>::new_box(k),
-        SmoothingType::Triangle(k) => Kernel::<f32>::new_triangle(k),
+        SmoothingType::Gaussian(k_size) => Kernel::<f32>::new_gaussian(k_size),
+        SmoothingType::Box(k_size) => Kernel::<f32>::new_box(k_size),
+        SmoothingType::Triangle(k_size) => Kernel::<f32>::new_triangle(k_size),
         SmoothingType::CustomF32(k) => k,
       };
       let mut current_level = image.clone();
@@ -1009,7 +1041,7 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
         current_level = current_level.resize_exact(
           (current_level.width() as f32 * params.scale_factor.get()) as u32,
           (current_level.height() as f32 * params.scale_factor.get()) as u32,
-          image::imageops::FilterType::Gaussian,
+          image::imageops::FilterType::Nearest,
         );
         levels.push(current_level.clone());
       }
