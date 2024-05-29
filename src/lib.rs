@@ -58,7 +58,10 @@
 //!
 //! ## Usage
 //!
-//! See the [crates.io page](https://crates.io/crates/image-pyramid) for installation instructions, then check out the [examples directory](./examples/) for example code. Below is a simple illustrative example of computing a default pyramid (Gaussian where each level is half resolution).
+//! See the [crates.io page](https://crates.io/crates/image-pyramid) for
+//! installation instructions, then check out the [examples directory](https://github.com/jnickg/image-pyramid/tree/main/examples)
+//! for example code. Below is a simple illustrative example of computing a
+//! default pyramid (Gaussian where each level is half resolution).
 //!
 //! ```rust
 //! use image::DynamicImage;
@@ -130,30 +133,6 @@
 //! };
 //! ```
 //!
-//! Finally, an example of creating a steerable pyramid:
-//!
-//! ```rust
-//! use image::DynamicImage;
-//! use image_pyramid::*;
-//!
-//! let image = DynamicImage::new_rgba8(640, 480); // Or load from file
-//!
-//! // Four directional filters, with a kernel size of 5, the canonical steerable pyramid.
-//! let steerable_params =
-//!   SteerableParams::new(NonZeroU8::new(4).unwrap(), OddValue::new(5).unwrap());
-//! let params = ImagePyramidParams {
-//!   pyramid_type: ImagePyramidType::Steerable(steerable_params),
-//!   ..Default::default()
-//! };
-//! let pyramid = match ImagePyramid::create(&image, Some(&params)) {
-//!   Ok(pyramid) => pyramid,
-//!   Err(e) => {
-//!     eprintln!("Error creating image pyramid: {}", e);
-//!     return;
-//!   }
-//! };
-//! ```
-//!
 //! For any pyramid, the result is a [`ImagePyramid`] instance, which contains
 //! the levels of the pyramid. Each level is a variant of [`ImagePyramidLevel`].
 //! Unless a steerable pyramid is made, levels are always
@@ -212,6 +191,10 @@ pub enum ImagePyramidError {
   /// Raised when the requested functionality is not yet supported.
   #[error("Functionality \"{0}\" is not yet implemented.")]
   NotImplemented(String),
+
+  /// Raised when the user requests a feature that is disabled at compile time
+  #[error("Feature \"{0}\" disabled at compile time. Rebuild with the appropriate feature flag.")]
+  FeatureDisabled(String),
 
   /// Raised when something unexpected went wrong in the library.
   #[error("Internal error: {0}")]
@@ -303,8 +286,8 @@ where
 ///
 /// The kernel can be used to filter an image with the
 /// [`Kernel::filter_in_place`] and [`Kernel::filter`] methods.
-#[derive(Debug, Clone)]
-pub struct Kernel<K> {
+#[derive(Clone)]
+pub struct Kernel<K: Num + Copy + Debug> {
   /// The elements of the kernel, stored in row-major layout. Its length is
   /// equal to $width \times height$
   pub data:   Vec<K>,
@@ -312,6 +295,29 @@ pub struct Kernel<K> {
   pub width:  u32,
   /// The height of the kernel
   pub height: u32,
+}
+
+impl<K: Num + Copy + Debug> Debug for Kernel<K> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "Kernel {{\n\twidth: {},\n\theight: {},\n\tdata: [",
+      self.width, self.height
+    )?;
+    for (i, d) in self.data.iter().enumerate() {
+      if i % self.width as usize == 0 {
+        write!(f, "\n\t\t")?;
+      }
+      write!(f, "{d:?}\t")?;
+    }
+    write!(f, "\n\t],")?;
+    write!(
+      f,
+      "\n\tsum: {:?}\n",
+      self.data.iter().fold(K::zero(), |acc, x| acc + *x)
+    )?;
+    write!(f, "}}")
+  }
 }
 
 impl<K: Num + Copy + Debug> Kernel<K> {
@@ -690,14 +696,31 @@ impl IntoOddValue for i32 {
 /// Parameters for generating a steerable image pyramid. These parameters are
 /// used to compute the steerable filters for each orientation.
 ///
-/// Steerable Filters are a class of oriented filters that can be expressed as a
-/// linear combination of a set of basis filters. As an example, let us consider
-/// isotropic Gaussian filter $G(x,y)$:
+/// This structure determines the number of orientations to compute, which are
+/// evenly spaced around the unit circle. The kernel size determines the size of
+/// the kernel to use for each filter.
+///
+/// # Background
+///
+/// - See [this page](http://www.cns.nyu.edu/~eero/steerpyr/) for a good
+///   explanation of a steerable pyramid.
+/// - [This page](https://flashypixels.wordpress.com/2017/02/17/derivative-of-gaussians-steerability/)
+///   also has a great explanation of steerable filters in general, using the
+///   Gaussian function.
+///
+/// Simply, put, a steerable pyramid is an image pyramid made up of multiple
+/// bandpass subbands, each oriented in a different direction, and includes a
+/// highpass subband for each non-terminal level, as well as the lowpass
+/// residual at the terminal level.
+///
+/// _Steerable filters_ are a class of oriented filters that can be expressed as
+/// a linear combination of a set of basis filters. As the most common example,
+/// consider isotropic Gaussian filter $G(x,y)$:
 /// - $G(x,y)=e^{−(x2+y2)}$
 ///
-/// First derivative of $G(x,y)$ is given by $G_1$ and let $G^{\theta}_{1}$ be
-/// the first derivative rotated by an angle $\theta$ about the origin. In $x$
-/// direction the angle $\theta=0^{\circ}$ and in $y$ direction,
+/// First derivative of $G(x,y)$ is given by $G_1$. Let $G^{\theta}_{1}$ be
+/// the first derivative of $G$, rotated by an angle $\theta$ about the origin;
+/// in the $x$ direction the angle is $\theta=0^{\circ}$ and in $y$ direction,
 /// $\theta=90^{\circ}$. The first derivatives in $x$ and $y$ directions are
 /// given by:
 /// - $G^{0^{\circ}}_1 = {{\partial{G}}\over{\partial{x}}} = −2xe^{−(x^2+y^2)}$,
@@ -705,29 +728,70 @@ impl IntoOddValue for i32 {
 /// - $G^{90^{\circ}}_1 = {{\partial{G}}\over{\partial{y}}} = −2ye^{−(x^2+y^2)}$
 ///
 /// In 2D space $G^{0^{\circ}}_1$ and $G^{90^{\circ}}_1$ are seen to span the
-/// entire space and are the basis filters. An arbitrarily oriented first
+/// entire space and are the basis filters. Thus, an arbitrarily-oriented first
 /// derivative filter can be expressed as a linear combination of these two
 /// filters:
 ///
 /// $G^{θ^{\circ}}_1 = G^{0^{\circ}}_1 \cos{\theta} + G^{90^{\circ}}_1
 /// \sin{\theta}$
 ///
-/// This structure determines the number of orientations to compute, which are
-/// evenly spaced around the unit circle. The kernel size determines the size of
-/// the kernel to use for each filter.
+/// This is how one bandpass subband filter is computed for a steerable pyramid.
+/// For a steerable pyramid with $n$ orientations, $n$ bandpass subbands are
+/// computed, each rotated by an angle of $360 \over n$ degrees.
+///
+/// # Example
+///
+/// This example creates a steerable pyramid with four orientations and a kernel
+/// size of 5. A kernel size of three is not recommended for steerable pyramids,
+/// as the filters may not well-defined with such a small kernel.
+///
+/// ```rust
+/// use image::DynamicImage;
+/// use image_pyramid::*;
+///
+/// let image = DynamicImage::new_rgba8(640, 480); // Or load from file
+///
+/// // Four directional filters, with a kernel size of 5, the canonical steerable pyramid.
+/// let steerable_params =
+///   SteerableParams::new(NonZeroU8::new(4).unwrap(), OddValue::new(5).unwrap());
+/// let params = ImagePyramidParams {
+///   pyramid_type: ImagePyramidType::Steerable(steerable_params),
+///   ..Default::default()
+/// };
+/// let pyramid = match ImagePyramid::create(&image, Some(&params)) {
+///   Ok(pyramid) => pyramid,
+///   Err(e) => {
+///     eprintln!("Error creating image pyramid: {}", e);
+///     return;
+///   }
+/// };
+/// ```
+///
+/// # Implementation
+///
+/// This crate takes advantage of the fact that $ f^{\theta} * I = \sum_{i}
+/// k_i{(\theta)}(f^i*I) $, where
+/// - $ f^{\theta} $ is the steerable filter at angle $ \theta $,
+/// - $ f^i $ is the $ i $th basis filter,
+/// - $ I $ is the input image,
+/// - $ k_i{(\theta)} $ is the steering function (weight) for $ f_i $ at angle $
+///   \theta $.
+///
+/// That is, for each level of the pyramid, only two convolutions are performed
+/// for the basis functions. Then, each steerable subband is computed by a
+/// linear combination of the results of the basis functions.
 #[derive(Debug, Clone)]
 pub struct SteerableParams {
   /// The number of orientations to compute.
   ///
   /// This is the number of filters to
-  /// compute, each rotated by an angle of `360 / num_orientations` degrees
-  /// using the formulas above.
+  /// compute. See [`SteerableParams`] for explanation.
   ///
   /// The default value is defined by [`DEFAULT_STEERABLE_NUM_ORIENTATIONS`].
   pub num_orientations: NonZeroU8,
 
   /// The size of the kernel to use for each filter. This is the size of the
-  /// kernel in both the x and y directions.
+  /// kernel in both the $x$ and $y$ directions.
   ///
   /// The default value is defined by [`DEFAULT_STEERABLE_KERNEL_SIZE`].
   pub kernel_size: OddValue,
@@ -764,24 +828,60 @@ pub(crate) fn sample_gaussian_2d(x: f32, y: f32, sigma: f32) -> f32 {
   sample_gaussian_1d(x, sigma) * sample_gaussian_1d(y, sigma)
 }
 
-pub(crate) fn sample_gaussian_1d_derivative(x: f32, sigma: f32) -> f32 {
+pub(crate) fn _sample_gaussian_1d_derivative(x: f32, sigma: f32) -> f32 {
   -x * sample_gaussian_1d(x, sigma) / sigma.powi(2)
 }
 
-pub(crate) fn sample_gaussian_2d_derivative_x(x: f32, y: f32, sigma: f32) -> f32 {
-  sample_gaussian_1d_derivative(x, sigma) * sample_gaussian_1d(y, sigma)
+pub(crate) fn _sample_gaussian_1d_second_derivative(x: f32, sigma: f32) -> f32 {
+  (x.powi(2) / sigma.powi(2) - 1.0) * sample_gaussian_1d(x, sigma) / sigma.powi(2)
 }
 
-pub(crate) fn sample_gaussian_2d_derivative_y(x: f32, y: f32, sigma: f32) -> f32 {
-  sample_gaussian_1d(x, sigma) * sample_gaussian_1d_derivative(y, sigma)
+pub(crate) fn _sample_gaussian_1d_third_derivative(x: f32, sigma: f32) -> f32 {
+  (3.0 - x.powi(2) / sigma.powi(2)) * x * sample_gaussian_1d(x, sigma) / sigma.powi(3)
 }
 
-pub(crate) fn factorial(number: i128) -> i128 {
+pub(crate) fn _sample_gaussian_1d_fourth_derivative(x: f32, sigma: f32) -> f32 {
+  (x.powi(4) / sigma.powi(4) - 6.0 * x.powi(2) / sigma.powi(2) + 3.0) * sample_gaussian_1d(x, sigma)
+    / sigma.powi(4)
+}
+
+pub(crate) fn _sample_gaussian_2d_derivative_x(x: f32, y: f32, sigma: f32) -> f32 {
+  _sample_gaussian_1d_derivative(x, sigma) * sample_gaussian_1d(y, sigma)
+}
+
+pub(crate) fn _sample_gaussian_2d_derivative_y(x: f32, y: f32, sigma: f32) -> f32 {
+  sample_gaussian_1d(x, sigma) * _sample_gaussian_1d_derivative(y, sigma)
+}
+
+pub(crate) fn _sample_gaussian_kth_order_derivative(x: f32, sigma: f32, k: u8) -> f32 {
+  (_factorial(k as i128) as f32).recip() / (sigma.powi(k as i32) * std::f32::consts::PI)
+    * (x.powi(k as i32) / sigma.powi(k as i32)).exp()
+}
+
+pub(crate) fn _sample_2d_gaussian_kth_order_derivative_with_respect_to_x(
+  x: f32,
+  y: f32,
+  sigma: f32,
+  k: u8,
+) -> f32 {
+  _sample_gaussian_kth_order_derivative(x, sigma, k) * sample_gaussian_1d(y, sigma)
+}
+
+pub(crate) fn _sample_2d_gaussian_kth_order_derivative_with_respect_to_y(
+  x: f32,
+  y: f32,
+  sigma: f32,
+  k: u8,
+) -> f32 {
+  sample_gaussian_1d(x, sigma) * _sample_gaussian_kth_order_derivative(y, sigma, k)
+}
+
+pub(crate) fn _factorial(number: i128) -> i128 {
   let mut factorial: i128 = 1;
-  for i in 1..(number + 1) {
+  for i in 1..=number {
     factorial *= i;
   }
-  return factorial;
+  factorial
 }
 
 impl SteerableParams {
@@ -817,44 +917,108 @@ impl SteerableParams {
     })
   }
 
-  pub fn get_kernels_with_sigma(&self, sigma: f32) -> Vec<Kernel<f32>> {
+  /// Computes the basis kernels for the given sigma value.
+  ///
+  /// The basis kernels are the first-order derivatives of the Gaussian kernel
+  /// with respect to $x$ and $y$. These are the basis functions for the
+  /// steerable pyramid.
+  ///
+  /// # Errors
+  /// Any errors are due to internal errors in creating the kernels, and are
+  /// a [`ImagePyramidError::Internal`] error. If this occurs, it is likely due
+  /// to a bug in the implementation. Please report this error [here](https://github.com/jnickg/image-pyramid/issues).
+  pub fn get_basis_kernels_with_sigma(
+    &self,
+    sigma: f32,
+  ) -> Result<(Kernel<f32>, Kernel<f32>), ImagePyramidError> {
+    let kernel_size = self.kernel_size.get();
+    let k_size_f32 = self.kernel_size.get() as f32;
+    let k_idx_offset = k_size_f32 / 2.0 - 0.5;
     let order = self.num_orientations.get() - 1;
+    // dbg!((kernel_size, k_idx_offset, order));
 
-    let constant = 2.0f32.powi(2 * order as i32) * factorial(order as i128).pow(2) as f32
-      / (self.num_orientations.get() as f32 * factorial(2 * order as i128) as f32);
+    let mut basis_x = Vec::with_capacity((kernel_size * kernel_size) as usize);
+    for y in 0..kernel_size as i32 {
+      for x in 0..kernel_size as i32 {
+        let x_f = x as f32 - k_idx_offset;
+        let y_f = y as f32 - k_idx_offset;
+        let val =
+          _sample_2d_gaussian_kth_order_derivative_with_respect_to_x(x_f, y_f, sigma, order);
+        // dbg!((x, x_f, y, y_f, val));
+        basis_x.push(val);
+      }
+    }
 
-    let angles: Vec<f32> = (0..self.num_orientations.get())
-      .map(|i| (i as f32) * 180.0 / (self.num_orientations.get() as f32))
-      .collect();
+    let mut basis_y = Vec::with_capacity((kernel_size * kernel_size) as usize);
+    for y in 0..kernel_size as i32 {
+      for x in 0..kernel_size as i32 {
+        let x_f = x as f32 - k_idx_offset;
+        let y_f = y as f32 - k_idx_offset;
+        let val =
+          _sample_2d_gaussian_kth_order_derivative_with_respect_to_y(x_f, y_f, sigma, order);
+        // dbg!((x, x_f, y, y_f, val));
+        basis_y.push(val);
+      }
+    }
 
-    // angles.iter().map(|angle| {
-    //   let angle_rad = angle.to_radians();
-    // }).collect()
+    let basis_x = Kernel::<f32>::new_normalized(&basis_x, self.kernel_size, self.kernel_size)
+      .map_err(|e| ImagePyramidError::Internal(format!("Error creating kernel: {e}")))?;
 
-    angles
+    let basis_y = Kernel::<f32>::new_normalized(&basis_y, self.kernel_size, self.kernel_size)
+      .map_err(|e| ImagePyramidError::Internal(format!("Error creating kernel: {e}")))?;
+
+    Ok((basis_x, basis_y))
+  }
+
+  /// Determines an appropriate $\sigma$ value for the given kernel size.
+  ///
+  /// As a convention, this is one third of the kernel size.
+  #[must_use]
+  pub fn sigma(&self) -> f32 { self.kernel_size.get() as f32 / 3.0 }
+
+  /// Computes the basis kernels with an automatic value for $\sigma$.
+  ///
+  /// # Errors
+  /// See [`SteerableParams::get_basis_kernels_with_sigma`] for more
+  /// information.
+  pub fn get_basis_kernels(&self) -> Result<(Kernel<f32>, Kernel<f32>), ImagePyramidError> {
+    self.get_basis_kernels_with_sigma(self.sigma())
+  }
+
+  /// Computes the angles for each filter in the steerable pyramid.
+  ///
+  /// # Errors
+  /// Errors are due to internal errors in computing the angles, and are a
+  /// [`ImagePyramidError::Internal`] error. If this occurs, it is likely due to
+  /// a bug in the implementation. Please report this error [here](https://github.com/jnickg/image-pyramid/issues).
+  pub fn get_kernels_with_sigma(&self, sigma: f32) -> Result<Vec<Kernel<f32>>, ImagePyramidError> {
+    // First, get the basis functions
+    let (basis_x, basis_y) = self.get_basis_kernels_with_sigma(sigma)?;
+
+    // Then, steer the basis functions to get the steerable filters
+    let angles = (0..self.num_orientations.get())
+      .map(|i| 2.0 * std::f32::consts::PI * i as f32 / self.num_orientations.get() as f32)
+      .collect::<Vec<f32>>();
+
+    let kernels = angles
       .iter()
-      .map(|angle| {
-        let angle_rad = angle.to_radians();
-        Kernel::new(
-          &(0..self.kernel_size.get())
-            .flat_map(|y| {
-              (0..self.kernel_size.get()).map(move |x| {
-                let x_f = x as f32 - (self.kernel_size.get() as f32) / 2.0;
-                let y_f = y as f32 - (self.kernel_size.get() as f32) / 2.0;
-                let cos = angle_rad.cos();
-                let sin = angle_rad.sin();
-                let g0_1 = sample_gaussian_2d_derivative_x(x_f, y_f, sigma);
-                let g90_1 = sample_gaussian_2d_derivative_y(x_f, y_f, sigma);
-                g0_1.mul_add(cos, g90_1 * sin)
-              })
-            })
-            .collect::<Vec<f32>>(),
-          self.kernel_size,
-          self.kernel_size,
-        )
-        .unwrap()
+      .map(|theta| {
+        let theta = theta.to_radians();
+        let cos_theta = theta.cos(); // The steering function for the x basis filter
+        let sin_theta = theta.sin(); // The steering function for the y basis filter
+
+        // $G_{\theta} = G_x \cos{\theta} + G_y \sin{\theta}$
+        let data: Vec<f32> = basis_x
+          .data
+          .iter()
+          .zip(basis_y.data.iter())
+          .map(|(x, y)| x * cos_theta + y * sin_theta)
+          .collect();
+        Kernel::new_normalized(&data, self.kernel_size, self.kernel_size)
       })
-      .collect()
+      .collect::<Result<Vec<Kernel<f32>>, ImagePyramidError>>()?;
+
+    Ok(kernels)
   }
 
   /// This takes the number of orientations and computes the first-order
@@ -863,12 +1027,18 @@ impl SteerableParams {
   /// It starts by computing the angles for each filter, then creates the two
   /// basis filters, and then computes each steerable filter as a linear
   /// combination of the two basis filters.
-  pub fn get_kernels(&self) -> Vec<Kernel<f32>> { self.get_kernels_with_sigma(1.0) }
+  ///
+  /// # Errors
+  /// See [`SteerableParams::get_kernels_with_sigma`] for more information.
+  pub fn get_kernels(&self) -> Result<Vec<Kernel<f32>>, ImagePyramidError> {
+    self.get_kernels_with_sigma(self.sigma())
+  }
 }
 
 /// What type of pyramid to compute. Each has different properties,
 /// applications, and computation cost.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ImagePyramidType {
   /// Use smoothing & subsampling to compute pyramid. This is used to generate
   /// mipmaps, thumbnails, display low-resolution previews of expensive image
@@ -882,7 +1052,7 @@ pub enum ImagePyramidType {
 
   /// Uses a bank of multi-orientation bandpass filters. Used for used for
   /// applications including image compression, texture synthesis, and object
-  /// recognition.
+  /// recognition. See [`SteerableParams`] for more information.
   Steerable(SteerableParams),
 }
 
@@ -934,6 +1104,7 @@ impl ImagePyramidParams {
 }
 
 /// The data associated with a given level of an image pyramid
+#[derive(Debug)]
 pub enum ImagePyramidLevel {
   /// A single image representing the result from a filter.
   ///
@@ -961,6 +1132,7 @@ pub enum ImagePyramidLevel {
 /// mipmap is essentially a way of storing a `scale=0.5` lowpass image pyramid
 /// such that an appropriate octave can be sampled by a graphics renderer, for
 /// the purpose of avoiding anti-aliasing.
+#[derive(Debug)]
 pub struct ImagePyramid {
   /// The ordered levels of the pyramid. Index N refers to pyramid level N.
   /// Depending on the scale factor $s$, and image dimensions $(w, h)$,
@@ -1114,13 +1286,12 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
           params,
         })
       }
-      ImagePyramidType::Steerable(steerable_params) => {
-        let mut _current_level = self.0.clone();
-        let mut _levels: Vec<ImagePyramidLevel> = Vec::new();
-        let _kernels = steerable_params.get_kernels();
-        Err(ImagePyramidError::NotImplemented(
-          "Steerable pyramid".to_string(),
-        ))
+      #[cfg(not(feature = "steerable"))]
+      ImagePyramidType::Steerable(_) =>
+        Err(ImagePyramidError::FeatureDisabled("steerable".to_string())),
+      #[cfg(feature = "steerable")]
+      ImagePyramidType::Steerable(_steerable_params) => {
+        todo!();
       }
     }
   }
@@ -1193,6 +1364,7 @@ mod tests {
   }
 
   #[test]
+  #[cfg_attr(not(feature = "steerable"), ignore)]
   fn compute_image_pyramid_imagepyramidtype_steerable_unimplemented() {
     let image = DynamicImage::new_rgb8(640, 480);
     let ipr = ImageToProcess(&image);
@@ -1204,6 +1376,27 @@ mod tests {
 
     let pyramid = ipr.compute_image_pyramid(Some(&params));
     assert!(pyramid.is_err());
+    // And the error should be that the feature is unimplemented
+    let err = pyramid.unwrap_err();
+    assert!(matches!(err, ImagePyramidError::NotImplemented(_)));
+  }
+
+  #[test]
+  #[cfg_attr(feature = "steerable", ignore)]
+  fn compute_image_pyramid_imagepyramidtype_steerable_disabled() {
+    let image = DynamicImage::new_rgb8(640, 480);
+    let ipr = ImageToProcess(&image);
+
+    let params = ImagePyramidParams {
+      pyramid_type: ImagePyramidType::Steerable(SteerableParams::default()),
+      ..Default::default()
+    };
+
+    let pyramid = ipr.compute_image_pyramid(Some(&params));
+    assert!(pyramid.is_err());
+    // And the error should be that the feature is disabled
+    let err = pyramid.unwrap_err();
+    assert!(matches!(err, ImagePyramidError::FeatureDisabled(_)));
   }
 
   #[test_matrix(
@@ -1259,14 +1452,5 @@ mod tests {
   fn into_unit_interval_err_when_1_0f32() {
     let i = 1.0f32.into_unit_interval();
     assert!(i.is_err());
-  }
-
-  #[test]
-  fn steerable_params_get_kernels() {
-    let params = SteerableParams::new(NonZeroU8::new(4).unwrap(), OddValue::new(5).unwrap());
-    let kernels = params.get_kernels();
-    assert_eq!(kernels.len(), 4);
-    assert_eq!(kernels[0].width, 5);
-    assert_eq!(kernels[0].height, 5);
   }
 }

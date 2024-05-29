@@ -49,12 +49,14 @@ struct Args {
   #[arg(long, value_name = "FLOAT", default_value = "0.5")]
   scale_factor: Option<f32>,
 
-  /// The size of the kernel to use when computing the pyramid. Must be an odd number.
+  /// The size of the kernel to use when computing the pyramid. Must be an odd
+  /// number.
   #[arg(long, value_name = "UINT", default_value = "3")]
   kernel_size: Option<u8>,
 
-  /// The number of orientations to use when computing a steerable pyramid. Only used
-  /// when `pyramid_type` is set to "steerable". If unspecified, defaults to 4.
+  /// The number of orientations to use when computing a steerable pyramid. Only
+  /// used when `pyramid_type` is set to "steerable". If unspecified, defaults
+  /// to 4.
   #[arg(long, value_name = "UINT", default_value = "4")]
   num_orientations: Option<u8>,
 }
@@ -78,7 +80,9 @@ fn main() {
   };
   let mut params = ImagePyramidParams::default();
   let kernel_size = if let Some(kernel_size) = args.kernel_size {
-    kernel_size.into_odd_value().unwrap_or(OddValue::new(3).unwrap())
+    kernel_size
+      .into_odd_value()
+      .unwrap_or(OddValue::new(3).unwrap())
   } else {
     OddValue::new(3).unwrap()
   };
@@ -103,17 +107,33 @@ fn main() {
       "laplacian" | "bandpass" => ImagePyramidType::Bandpass(smoothing_type(kernel_size)),
       "gaussian" | "lowpass" => ImagePyramidType::Lowpass(smoothing_type(kernel_size)),
       "steerable" => {
-        let orientations = if let Some(orientations) = args.num_orientations {
-          NonZeroU8::new(orientations)
-        } else {
-          eprintln!("Number of orientations not specified. Defaulting to 4...");
-          NonZeroU8::new(4)
-        };
-        let orientations = if let Some(orientations) = orientations { orientations } else {
-          eprintln!("Invalid number of orientations: {}. Defaulting to 4", args.num_orientations.unwrap());
+        #[cfg(feature = "steerable")]
+        {
+          let orientations = if let Some(orientations) = args.num_orientations {
+            NonZeroU8::new(orientations)
+          } else {
+            eprintln!("Number of orientations not specified. Defaulting to 4...");
+            NonZeroU8::new(4)
+          };
+          let orientations = if let Some(orientations) = orientations {
+            orientations
+          } else {
+            eprintln!(
+              "Invalid number of orientations: {}. Defaulting to 4",
+              args.num_orientations.unwrap()
+            );
+            return;
+          };
+          ImagePyramidType::Steerable(SteerableParams::new(orientations, kernel_size))
+        }
+        #[cfg(not(feature = "steerable"))]
+        {
+          eprintln!(
+            "Steerable pyramid support is not enabled. Recompile with the `steerable` feature to \
+             enable steerable pyramid support."
+          );
           return;
-        };
-        ImagePyramidType::Steerable(SteerableParams::new(orientations, kernel_size))
+        }
       }
       _ => {
         eprintln!(
@@ -157,12 +177,12 @@ fn main() {
     let filename = std::path::Path::new(&args.output).join(format!("L{}.{}", l, image_extension));
     match level {
       ImagePyramidLevel::Single(i) => save_image_and_log(i, filename.to_str().unwrap()),
-      ImagePyramidLevel::Bank(images) => {
+      ImagePyramidLevel::Bank(images) =>
         for (j, i) in images.iter().enumerate() {
-          let filename = std::path::Path::new(&args.output).join(format!("L{}_{}.{}", l, j, image_extension));
+          let filename =
+            std::path::Path::new(&args.output).join(format!("L{}_{}.{}", l, j, image_extension));
           save_image_and_log(i, filename.to_str().unwrap())
-        }
-      }
+        },
     }
   }
 }

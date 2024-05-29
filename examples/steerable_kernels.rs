@@ -21,8 +21,8 @@
 
 use anyhow::{Ok, Result};
 use clap::Parser;
-use image_pyramid::*;
 use image::{DynamicImage, ImageBuffer};
+use image_pyramid::*;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = "TODO")]
@@ -43,6 +43,27 @@ struct Args {
   /// The standard deviation to use when sampling the Gaussian function.
   #[arg(long, value_name = "FLOAT", default_value = "1.0")]
   sigma: f32,
+
+  /// Whether to include the basis kernels in the output
+  #[arg(long, action)]
+  include_basis: bool,
+}
+
+fn save_kernel_as_image(kernel: &Kernel<f32>, path: &str) -> Result<()> {
+  let kernel_data_u16 = kernel
+    .data
+    .iter()
+    .map(|&x| {
+      let x = x as f32;
+      let x = (x / 2.0 + 0.5) * 65535.0;
+      x as u16
+    })
+    .collect();
+  let kernel_buffer =
+    ImageBuffer::from_raw(kernel.width as u32, kernel.height as u32, kernel_data_u16).unwrap();
+  let kernel_image = DynamicImage::ImageLuma16(kernel_buffer);
+  kernel_image.save(path)?;
+  Ok(())
 }
 
 fn main() -> Result<()> {
@@ -54,23 +75,24 @@ fn main() -> Result<()> {
   let sigma = args.sigma;
 
   let steerable_params = SteerableParams {
-    kernel_size: OddValue::new(kernel_size)?,
+    kernel_size:      OddValue::new(kernel_size)?,
     num_orientations: NonZeroU8::new(num_orientations)
       .ok_or(anyhow::anyhow!("num_orientations must be greater than 0"))?,
   };
 
+  if args.include_basis {
+    let (basis_x, basis_y) = steerable_params.get_basis_kernels_with_sigma(sigma)?;
+    dbg!(&basis_x);
+    dbg!(&basis_y);
+    save_kernel_as_image(&basis_x, &format!("{}/basis_kernel_x.png", args.output))?;
+    save_kernel_as_image(&basis_y, &format!("{}/basis_kernel_y.png", args.output))?;
+  }
 
   let kernels = steerable_params.get_kernels_with_sigma(sigma);
   for (i, kernel) in kernels.iter().enumerate() {
+    dbg!(&kernel);
     let kernel_path = format!("{}/kernel_{}.png", args.output, i);
-    let kernel_data_u16 = kernel.data.iter().map(|&x| {
-      let x = x as f32;
-      let x = (x / 2.0 + 0.5) * 65535.0;
-      x as u16
-    }).collect();
-    let kernel_buffer = ImageBuffer::from_raw(kernel_size as u32, kernel_size as u32, kernel_data_u16).unwrap();
-    let kernel_image = DynamicImage::ImageLuma16(kernel_buffer);
-    kernel_image.save(kernel_path)?;
+    save_kernel_as_image(kernel, &kernel_path)?;
   }
 
   Ok(())
