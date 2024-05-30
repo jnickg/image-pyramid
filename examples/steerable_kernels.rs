@@ -80,15 +80,12 @@ fn main() -> Result<()> {
 
   if args.include_basis {
     let (basis_x, basis_y) = steerable_params.get_basis_kernels()?;
-    dbg!(&basis_x);
-    dbg!(&basis_y);
     save_kernel_as_image(&basis_x, &format!("{}/basis_kernel_x.png", args.output))?;
     save_kernel_as_image(&basis_y, &format!("{}/basis_kernel_y.png", args.output))?;
   }
 
   let kernels = steerable_params.get_kernels()?;
   for (i, kernel) in kernels.iter().enumerate() {
-    dbg!(&kernel);
     let kernel_path = format!("{}/kernel_{}.png", args.output, i);
     save_kernel_as_image(kernel, &kernel_path)?;
   }

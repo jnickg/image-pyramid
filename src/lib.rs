@@ -380,11 +380,16 @@ impl<K: Num + Copy + Debug> Kernel<K> {
   ) -> Result<Self, ImagePyramidError>
   where
     K: Float,
-    K2: Num + Copy + Debug + Into<K>,
+    K2: Num + Copy + Debug + Into<K> + PartialOrd,
   {
     let mut sum = K2::zero();
+    let mut max = K2::zero();
     for i in data {
       sum = sum + *i;
+      max = if *i > max { *i } else { max };
+    }
+    if sum == K2::zero() {
+      sum = max;
     }
     let data_norm: Vec<K> = data
       .iter()
@@ -820,6 +825,8 @@ pub(crate) fn sample_triangle_2d(x: f32, y: f32, w: f32) -> f32 {
   sample_triangle_1d(x, w) * sample_triangle_1d(y, w)
 }
 
+/// Samples the Gaussian function at the given point $x$ with standard deviation
+/// $\sigma$
 pub(crate) fn sample_gaussian_1d(x: f32, sigma: f32) -> f32 {
   ((2.0 * std::f32::consts::PI).sqrt() * sigma).recip() * (-x.powi(2) / (2.0 * sigma.powi(2))).exp()
 }
@@ -828,12 +835,68 @@ pub(crate) fn sample_gaussian_2d(x: f32, y: f32, sigma: f32) -> f32 {
   sample_gaussian_1d(x, sigma) * sample_gaussian_1d(y, sigma)
 }
 
-pub(crate) fn sample_gaussian_1d_deriv(x: f32, sigma: f32, order: u8) -> f32 {
-  (factorial(order as i128) as f32).recip() / (sigma.powi(order as i32) * std::f32::consts::PI)
-    * (x.powi(order as i32) / sigma.powi(order as i32)).exp()
+/// Computes the gradient of the given 2D vector with respect to X
+///
+/// The gradient is computed using second order accurate central differences in
+/// the interior points and either first or second order accurate one-sides
+/// (forward or backwards) differences at the boundaries. The returned gradient
+/// hence has the same shape as the input array.
+///
+/// The gradient with respect to x is computed as $a(x+1, y) - a(x-1, y)$
+pub(crate) fn gradient_x<T: Num + Copy>(a: &Vec<T>, w: usize, h: usize) -> Vec<T> {
+  assert_eq!(
+    a.len(),
+    w * h,
+    "Input array must have the same shape as the image"
+  );
+  let mut grad = vec![T::zero(); w * h];
+  for y in 0..h {
+    for x in 0..w {
+      let x = x as isize;
+      let y = y as isize;
+      let idx = y * w as isize + x;
+      let idx = idx as usize;
+      let x = x as usize;
+      let y = y as usize;
+      let x0 = if x > 0 { x - 1 } else { x };
+      let x1 = if x < w - 1 { x + 1 } else { x };
+      let idx0 = y * w + x0;
+      let idx1 = y * w + x1;
+      grad[idx] = a[idx1] - a[idx0];
+    }
+  }
+  grad
 }
 
-pub(crate) fn factorial(number: i128) -> i128 {
+/// Computes the gradient of the given 2D vector with respect to Y
+///
+/// See [`gradient_x`] for more general information on gradients
+pub(crate) fn gradient_y<T: Num + Copy>(a: &Vec<T>, w: usize, h: usize) -> Vec<T> {
+  assert_eq!(
+    a.len(),
+    w * h,
+    "Input array must have the same shape as the image"
+  );
+  let mut grad = vec![T::zero(); w * h];
+  for y in 0..h {
+    for x in 0..w {
+      let x = x as isize;
+      let y = y as isize;
+      let idx = y * w as isize + x;
+      let idx = idx as usize;
+      let x = x as usize;
+      let y = y as usize;
+      let y0 = if y > 0 { y - 1 } else { y };
+      let y1 = if y < h - 1 { y + 1 } else { y };
+      let idx0 = y0 * w + x;
+      let idx1 = y1 * w + x;
+      grad[idx] = a[idx1] - a[idx0];
+    }
+  }
+  grad
+}
+
+pub(crate) fn _factorial(number: i128) -> i128 {
   let mut factorial: i128 = 1;
   for i in 1..=number {
     factorial *= i;
@@ -888,32 +951,30 @@ impl SteerableParams {
     &self,
     sigma: f32,
   ) -> Result<(Kernel<f32>, Kernel<f32>), ImagePyramidError> {
-    let kernel_size = self.kernel_size.get();
+    let kernel_size = self.kernel_size.get() as usize;
     let k_size_f32 = self.kernel_size.get() as f32;
     let k_idx_offset = k_size_f32 / 2.0 - 0.5;
-    let _order = self.num_orientations.get() - 1;
-    // dbg!((kernel_size, k_idx_offset, order));
+    let order = self.num_orientations.get() - 1;
 
-    let mut basis_x = Vec::with_capacity(kernel_size as usize * kernel_size as usize);
+    let mut gaussian = Vec::with_capacity(kernel_size * kernel_size);
     for y in 0..kernel_size as i32 {
       for x in 0..kernel_size as i32 {
         let x_f = x as f32 - k_idx_offset;
         let y_f = y as f32 - k_idx_offset;
-        let val = sample_gaussian_1d_deriv(x_f, sigma, 1) * sample_gaussian_1d(y_f, sigma);
-        // dbg!((x, x_f, y, y_f, val));
-        basis_x.push(val);
+        let val = sample_gaussian_2d(x_f, y_f, sigma);
+        gaussian.push(val);
       }
     }
+    let gaussian =
+      Kernel::<f32>::new_normalized(&gaussian, self.kernel_size, self.kernel_size).unwrap();
 
-    let mut basis_y = Vec::with_capacity(kernel_size as usize * kernel_size as usize);
-    for y in 0..kernel_size as i32 {
-      for x in 0..kernel_size as i32 {
-        let x_f = x as f32 - k_idx_offset;
-        let y_f = y as f32 - k_idx_offset;
-        let val = sample_gaussian_1d(x_f, sigma) * sample_gaussian_1d_deriv(y_f, sigma, 1);
-        // dbg!((x, x_f, y, y_f, val));
-        basis_y.push(val);
-      }
+    let mut basis_x = gaussian.data.clone();
+    let mut basis_y = gaussian.data.clone();
+
+    // Compute the partial derivative of the Gaussian kernel with respect to x and y
+    for _ in 0..order {
+      basis_x = gradient_x(&basis_x, kernel_size, kernel_size);
+      basis_y = gradient_y(&basis_y, kernel_size, kernel_size);
     }
 
     let basis_x = Kernel::<f32>::new_normalized(&basis_x, self.kernel_size, self.kernel_size)
@@ -925,7 +986,8 @@ impl SteerableParams {
     Ok((basis_x, basis_y))
   }
 
-  /// Determines an appropriate $\sigma$ (standard deviation) value for the given kernel size.
+  /// Determines an appropriate $\sigma$ (standard deviation) value for the
+  /// given kernel size.
   ///
   /// As a convention, this is one third of the kernel size.
   #[must_use]
@@ -952,13 +1014,12 @@ impl SteerableParams {
 
     // Then, steer the basis functions to get the steerable filters
     let angles = (0..self.num_orientations.get())
-      .map(|i| 2.0 * std::f32::consts::PI * i as f32 / self.num_orientations.get() as f32)
+      .map(|i| std::f32::consts::PI * i as f32 / self.num_orientations.get() as f32)
       .collect::<Vec<f32>>();
 
     let kernels = angles
       .iter()
       .map(|theta| {
-        let theta = theta.to_radians();
         let cos_theta = theta.cos(); // The steering function for the x basis filter
         let sin_theta = theta.sin(); // The steering function for the y basis filter
 
@@ -967,9 +1028,10 @@ impl SteerableParams {
           .data
           .iter()
           .zip(basis_y.data.iter())
-          .map(|(x, y)| x * cos_theta + y * sin_theta)
+          .map(|(bx, by)| bx * cos_theta + by * sin_theta)
           .collect();
-        Kernel::new_normalized(&data, self.kernel_size, self.kernel_size)
+        let steered_kernel = Kernel::new(&data, self.kernel_size, self.kernel_size);
+        steered_kernel
       })
       .collect::<Result<Vec<Kernel<f32>>, ImagePyramidError>>()?;
 
@@ -1245,9 +1307,8 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
       ImagePyramidType::Steerable(_) =>
         Err(ImagePyramidError::FeatureDisabled("steerable".to_string())),
       #[cfg(feature = "steerable")]
-      ImagePyramidType::Steerable(_steerable_params) => {
-        todo!();
-      }
+      ImagePyramidType::Steerable(_steerable_params) =>
+        Err(ImagePyramidError::NotImplemented("steerable".to_string())),
     }
   }
 }
@@ -1258,6 +1319,75 @@ mod tests {
   use test_case::{test_case, test_matrix};
 
   use super::{kernel_size::*, *};
+
+  #[test_case(0, 1)]
+  #[test_case(1, 1)]
+  #[test_case(2, 2)]
+  #[test_case(3, 6)]
+  #[test_case(4, 24)]
+  #[test_case(5, 120)]
+  #[test_case(6, 720)]
+  #[test_case(7, 5040)]
+  #[test_case(8, 40320)]
+  #[test_case(9, 362880)]
+  #[test_case(10, 3628800)]
+  fn factorial_produces_expected_results(input: i128, expected: i128) {
+    assert_eq!(_factorial(input), expected);
+  }
+
+  #[test]
+  fn gradient_x_produces_expected_results() {
+    let a = vec![1, 2, 1, 2, 4, 2, 1, 2, 1];
+    let grad = gradient_x(&a, 3, 3);
+    let expected = vec![1, 0, -1, 2, 0, -2, 1, 0, -1];
+    assert_eq!(grad, expected);
+  }
+
+  #[test]
+  fn gradient_x_f32_produces_expected_results() {
+    #[rustfmt::skip]
+    let a = vec![
+      0.07511362, 0.12384141, 0.07511362,
+      0.12384141, 0.20417997, 0.12384141,
+      0.07511362, 0.12384141, 0.07511362,
+    ];
+    assert_relative_eq!(1.0, a.iter().sum::<f32>());
+    let grad = gradient_x(&a, 3, 3);
+    #[rustfmt::skip]
+    let expected = vec![
+      0.048727795, 0.0, -0.048727795,
+      0.08033856,  0.0, -0.08033856,
+      0.048727795, 0.0, -0.048727795,
+    ];
+    assert_eq!(grad, expected);
+  }
+
+  #[test]
+  fn gradient_y_produces_expected_results() {
+    let a = vec![1, 2, 1, 2, 4, 2, 1, 2, 1];
+    let expected = vec![1, 2, 1, 0, 0, 0, -1, -2, -1];
+    let grad = gradient_y(&a, 3, 3);
+    assert_eq!(grad, expected);
+  }
+
+  #[test]
+  fn gradient_y_f32_produces_expected_results() {
+    #[rustfmt::skip]
+    let a = vec![
+      0.07511362, 0.12384141, 0.07511362,
+      0.12384141, 0.20417997, 0.12384141,
+      0.07511362, 0.12384141, 0.07511362,
+    ];
+    assert_relative_eq!(1.0, a.iter().sum::<f32>());
+    let grad = gradient_y(&a, 3, 3);
+    #[rustfmt::skip]
+    let expected = vec![
+      0.048727795,   0.08033856,  0.048727795,
+      0.0,           0.0,         0.0,
+      -0.048727795, -0.08033856, -0.048727795,
+    ];
+    assert_eq!(grad, expected);
+  }
 
   #[test_case(0.0, 1.0, 0.398_942_3)]
   #[test_case(1.0, 1.0, 0.241_970_73)]
