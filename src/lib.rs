@@ -34,7 +34,9 @@
 //! - Lowpass pyramids (sometimes called Gaussian pyramids, or just "image
 //!   pyramids"). These are the basis for mipmaps.
 //! - Bandpass pyramids (often called Laplacian pyramids)
-//! - Steerable pyramids, which are explained [here](http://www.cns.nyu.edu/~eero/steerpyr/)
+//! - Steerable pyramids, which are explained under [`SteerableParams`] and
+//!   [`ImagePyramidType::Steerable`]. This feature is disabled by default. See
+//!   the [feature flags](#feature-flags) section for more information.
 //!
 //! For the lowpass and bandpass pyramids, the user can specify the type of
 //! smoothing to use when downsampling the image. The default is a Gaussian
@@ -55,6 +57,16 @@
 //!   has a decent explanation of a steerable pyramid
 //! - [This NYU Page](http://www.cns.nyu.edu/~eero/steerpyr/) has a good
 //!   explanation of steerable pyramids
+//!
+//! ## Feature Flags
+//!
+//! - `steerable` - Enables support for steerable pyramids. This feature is
+//!   disabled by default, as it adds a dependency on the `nalgebra` and
+//!   `ndarray` crates. If you need steerable pyramids, enable this feature in
+//!   your `Cargo.toml` file.
+//! - `rayon` - Enables parallel processing for pyramid computation. This is
+//!   disabled by default, as it adds a dependency on the `rayon` crate. If you
+//!   need parallel processing, enable this feature in your `Cargo.toml` file.
 //!
 //! ## Usage
 //!
@@ -192,8 +204,15 @@ pub enum ImagePyramidError {
   #[error("Functionality \"{0}\" is not yet implemented.")]
   NotImplemented(String),
 
-  /// Raised when the user requests a feature that is disabled at compile time
-  #[error("Feature \"{0}\" disabled at compile time. Rebuild with the appropriate feature flag.")]
+  /// Raised when the user requests a feature that is disabled at compile time.
+  ///
+  /// Features may be disabled at compile time due to large dependencies that
+  /// users may want to exclude from their build, if they are not using the
+  /// feature in question.
+  #[error(
+    "Feature \"{0}\" disabled at compile time. Rebuild with the appropriate feature flag. See \
+     documentation for details."
+  )]
   FeatureDisabled(String),
 
   /// Raised when something unexpected went wrong in the library.
@@ -1070,6 +1089,9 @@ pub enum ImagePyramidType {
   /// Uses a bank of multi-orientation bandpass filters. Used for used for
   /// applications including image compression, texture synthesis, and object
   /// recognition. See [`SteerableParams`] for more information.
+  ///
+  /// When this type is used, the result produces a [`ImagePyramidLevel::Bank`]
+  /// result
   Steerable(SteerableParams),
 }
 
