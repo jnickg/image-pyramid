@@ -339,7 +339,56 @@ impl<K: Num + Copy + Debug> Debug for Kernel<K> {
   }
 }
 
-impl<K: Num + Copy + Debug> Kernel<K> {
+/// An auxiliary trait used to determine in a value is sufficiently close to
+/// zero that it likely was intended to be zero
+///
+/// This accounts for floating-point error when sampling continuous functions
+/// like the Gaussian, where discretizing and normalizing may lead to
+/// divide-by-zero errors. Instead, we check if the sum of the kernel is close
+/// to zero with an epsilon.
+pub trait CheckProbablyZero {
+  fn is_probably_zero(&self) -> bool;
+}
+
+macro_rules! impl_check_if_zero_fp {
+  ($($t:ty),*) => {
+    $(
+      impl CheckProbablyZero for $t {
+        fn is_probably_zero(&self) -> bool {
+          self.abs() < <$t>::epsilon()
+        }
+      }
+    )*
+  };
+}
+impl_check_if_zero_fp!(f32, f64);
+
+macro_rules! impl_check_if_zero_int {
+  ($($t:ty),*) => {
+    $(
+      impl CheckProbablyZero for $t {
+        fn is_probably_zero(&self) -> bool {
+          *self == 0
+        }
+      }
+    )*
+  };
+}
+impl_check_if_zero_int!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
+
+/// An auxiliary trait describing values that can be used as elements in a
+/// [`Kernel`]
+pub trait KernelElement: Num + Copy + Debug + CheckProbablyZero + PartialOrd {}
+macro_rules! impl_kernel_element {
+  ($($t:ty),*) => {
+    $(
+      impl KernelElement for $t {}
+    )*
+  };
+}
+impl_kernel_element!(f32, f64, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
+
+impl<K: KernelElement> Kernel<K> {
   /// Construct a kernel from a slice and its dimensions. The input slice is
   /// in row-major form. For example, a 3x3 matrix with data
   /// `[0,1,0,1,2,1,0,1,0`] describes the following matrix:
@@ -399,7 +448,7 @@ impl<K: Num + Copy + Debug> Kernel<K> {
   ) -> Result<Self, ImagePyramidError>
   where
     K: Float,
-    K2: Num + Copy + Debug + Into<K> + PartialOrd,
+    K2: KernelElement + Into<K>,
   {
     let mut sum = K2::zero();
     let mut max = K2::zero();
@@ -407,9 +456,12 @@ impl<K: Num + Copy + Debug> Kernel<K> {
       sum = sum + *i;
       max = if *i > max { *i } else { max };
     }
-    if sum == K2::zero() {
-      sum = max;
-    }
+    // If the sum is sufficiently close to zero, assume it is a derivative kernel,
+    // meaning the DC component is supposed to zero. Normalize instead using the
+    // maximum absolute value in the kernel. For floating point types, use an
+    // epsilon for checking zero. For integet types, use strict equality
+    let sum = if sum.is_probably_zero() { max } else { sum };
+
     let data_norm: Vec<K> = data
       .iter()
       .map(|x| <K2 as Into<K>>::into(*x) / <K2 as Into<K>>::into(sum))
@@ -973,7 +1025,7 @@ impl SteerableParams {
     let kernel_size = self.kernel_size.get() as usize;
     let k_size_f32 = self.kernel_size.get() as f32;
     let k_idx_offset = k_size_f32 / 2.0 - 0.5;
-    let order = self.num_orientations.get() - 1;
+    let order = 1;
 
     let mut gaussian = Vec::with_capacity(kernel_size * kernel_size);
     for y in 0..kernel_size as i32 {
@@ -986,6 +1038,7 @@ impl SteerableParams {
     }
     let gaussian =
       Kernel::<f32>::new_normalized(&gaussian, self.kernel_size, self.kernel_size).unwrap();
+    dbg!(&gaussian);
 
     let mut basis_x = gaussian.data.clone();
     let mut basis_y = gaussian.data.clone();
@@ -996,11 +1049,21 @@ impl SteerableParams {
       basis_y = gradient_y(&basis_y, kernel_size, kernel_size);
     }
 
+    dbg!(&basis_x);
+    dbg!(&basis_y);
+
+    let sum_basis_x: f32 = basis_x.iter().sum();
+    let sum_basis_y: f32 = basis_y.iter().sum();
+    dbg!((sum_basis_x, sum_basis_y));
+
     let basis_x = Kernel::<f32>::new_normalized(&basis_x, self.kernel_size, self.kernel_size)
       .map_err(|e| ImagePyramidError::Internal(format!("Error creating kernel: {e}")))?;
 
     let basis_y = Kernel::<f32>::new_normalized(&basis_y, self.kernel_size, self.kernel_size)
       .map_err(|e| ImagePyramidError::Internal(format!("Error creating kernel: {e}")))?;
+
+    dbg!(&basis_x);
+    dbg!(&basis_y);
 
     Ok((basis_x, basis_y))
   }

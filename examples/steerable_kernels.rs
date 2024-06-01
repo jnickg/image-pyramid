@@ -47,11 +47,11 @@ struct Args {
 
 fn save_kernel_as_image(kernel: &Kernel<f32>, path: &str) -> Result<()> {
   // first, normalize the kernel data so that its max value is 1.0 and min value is 0.0
-  // let max_value = kernel.data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-  // let min_value = kernel.data.iter().cloned().fold(f32::INFINITY, f32::min);
-  // let kernel_data_normalized: Vec<f32> = kernel.data.iter().map(|&x| (x - min_value) / (max_value - min_value)).collect();
+  let max_value = kernel.data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+  let min_value = kernel.data.iter().cloned().fold(f32::INFINITY, f32::min);
+  let kernel_data_normalized: Vec<f32> = kernel.data.iter().map(|&x| (x - min_value) / (max_value - min_value)).collect();
   dbg!((&path, kernel));
-  let kernel_data_normalized = kernel.data.clone();
+  // let kernel_data_normalized = kernel.data.clone();
   let kernel_data_u8 = kernel_data_normalized
     .iter()
     .map(|&x| {
