@@ -804,7 +804,7 @@ impl IntoOddValue for i32 {
 /// That is, for each level of the pyramid, only two convolutions are performed
 /// for the basis functions. Then, each steerable subband is computed by a
 /// linear combination of the results of the basis functions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct SteerableParams {
   /// The number of orientations to compute.
   ///
@@ -1012,6 +1012,17 @@ impl SteerableParams {
   #[must_use]
   pub fn sigma(&self) -> f32 { self.kernel_size.get() as f32 / 3.0 }
 
+  /// Gets the angles for each directional filter in the steerable pyramid.
+  ///
+  /// These are automatically computed based on
+  /// [`SteerableParams::num_orientations`].
+  #[must_use]
+  pub fn get_angles(&self) -> Vec<f32> {
+    (0..self.num_orientations.get())
+      .map(|i| std::f32::consts::PI * i as f32 / self.num_orientations.get() as f32)
+      .collect()
+  }
+
   /// Computes the basis kernels with an automatic value for $\sigma$.
   ///
   /// # Errors
@@ -1032,9 +1043,7 @@ impl SteerableParams {
     let (basis_x, basis_y) = self.get_basis_kernels_with_sigma(sigma)?;
 
     // Then, steer the basis functions to get the steerable filters
-    let angles = (0..self.num_orientations.get())
-      .map(|i| std::f32::consts::PI * i as f32 / self.num_orientations.get() as f32)
-      .collect::<Vec<f32>>();
+    let angles = self.get_angles();
 
     let kernels = angles
       .iter()
@@ -1259,6 +1268,17 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
       Ok(levels)
     }
 
+    // fn lowpass_in_place(image: &mut DynamicImage, params: &ImagePyramidParams) ->
+    // Result<(), ImagePyramidError> {   let smoothing_type =
+    // params.get_lowpass_smoothing_type();   let kernel = match smoothing_type
+    // {     SmoothingType::Gaussian(k_size) =>
+    // Kernel::<f32>::new_gaussian(k_size),     SmoothingType::Box(k_size) =>
+    // Kernel::<f32>::new_box(k_size),     SmoothingType::Triangle(k_size) =>
+    // Kernel::<f32>::new_triangle(k_size),     SmoothingType::CustomF32(k) =>
+    // k,   };
+    //   kernel.filter_in_place(image, |c, a| *c = a as u8)
+    // }
+
     /// Takes the diference in pixel values between `image` and `other`, adds
     /// that value to the center of the Subpixel container type's range, and
     /// applies the result to `image`.
@@ -1292,6 +1312,27 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
       }
     }
 
+    fn compute_bandpass_pyramid(
+      image: &DynamicImage,
+      params: &ImagePyramidParams,
+    ) -> Result<Vec<DynamicImage>, ImagePyramidError> {
+      // First, we need a lowpass pyramid to work with.
+      let mut levels = compute_lowpass_pyramid(image, &params)?;
+
+      // For each index $i$, upscale the resolution of pyramid level $L_{i+1}$ to
+      // match the resolution of pyramid level $L_i$. Then we compute the pixel-wise
+      // difference between them, and store the result in the current level.
+      for i in 0..levels.len() - 1 {
+        let next_level = levels[i + 1].resize_exact(
+          levels[i].width(),
+          levels[i].height(),
+          image::imageops::FilterType::Nearest,
+        );
+        bandpass_in_place(&mut levels[i], &next_level);
+      }
+
+      Ok(levels)
+    }
     // If unspecified, use default parameters.
     let params = params.map_or_else(ImagePyramidParams::default, std::clone::Clone::clone);
 
@@ -1304,33 +1345,109 @@ impl<'a> CanComputePyramid for ImageToProcess<'a> {
             .collect(),
           params: params.clone(),
         }),
-      ImagePyramidType::Bandpass(_) => {
-        // First, we need a lowpass pyramid to work with.
-        let mut levels = compute_lowpass_pyramid(self.0, &params)?;
-
-        // For each index $i$, upscale the resolution of pyramid level $L_{i+1}$ to
-        // match the resolution of pyramid level $L_i$. Then we compute the pixel-wise
-        // difference between them, and store the result in the current level.
-        for i in 0..levels.len() - 1 {
-          let next_level = levels[i + 1].resize_exact(
-            levels[i].width(),
-            levels[i].height(),
-            image::imageops::FilterType::Nearest,
-          );
-          bandpass_in_place(&mut levels[i], &next_level);
-        }
-
+      ImagePyramidType::Bandpass(_) =>
         Ok(ImagePyramid {
-          levels: levels.into_iter().map(ImagePyramidLevel::Single).collect(),
-          params,
-        })
-      }
+          levels: compute_bandpass_pyramid(self.0, &params)?
+            .into_iter()
+            .map(ImagePyramidLevel::Single)
+            .collect(),
+          params: params.clone(),
+        }),
       #[cfg(not(feature = "steerable"))]
       ImagePyramidType::Steerable(_) =>
         Err(ImagePyramidError::FeatureDisabled("steerable".to_string())),
       #[cfg(feature = "steerable")]
-      ImagePyramidType::Steerable(_steerable_params) =>
-        Err(ImagePyramidError::NotImplemented("steerable".to_string())),
+      ImagePyramidType::Steerable(steerable_params) => {
+        // At each level, we compute:
+        // - The bandpass (high pass) subband H_n
+        // - The lowpass (residual) subband L_n
+        // - The steerable subbands which are the result of convolving L_n with the
+        //   basis filters, then for each orientation, steering the filter response to
+        //   the desired orientation.
+        //
+        // Then, we subsample L_n to get L_{n+1}, and repeat the process.
+
+        // First, compute the lowpass pyramid
+        #[allow(nonstandard_style)]
+        let L = compute_lowpass_pyramid(self.0, &params)?;
+        #[allow(nonstandard_style)]
+        let H = compute_bandpass_pyramid(self.0, &params)?;
+
+        // Compute the steerable pyramid
+        let (basis_kernel_x, basis_kernel_y) = steerable_params.get_basis_kernels()?;
+
+        // Convolutions are done in-place, so we need to clone the lowpass pyramid
+        // for each of the basis kernels
+        let mut basis_pyramid_x = L.clone();
+        let mut basis_pyramid_y = L.clone();
+        basis_pyramid_x.iter_mut().for_each(|l| {
+          basis_kernel_x
+            .filter_in_place(l, |c, a| *c = a as u8)
+            .unwrap()
+        });
+        basis_pyramid_y.iter_mut().for_each(|l| {
+          basis_kernel_y
+            .filter_in_place(l, |c, a| *c = a as u8)
+            .unwrap()
+        });
+
+        // Now that we have the basis responses for each pyramid level, we can
+        // steer those responses for each of the angles to form our levels
+        let angles = steerable_params.get_angles();
+
+        // Levels is a vector of vectors, where each inner vector is the steered
+        // response for one of the angles, and the outer vector is the set of
+        // all steered responses arranged by pyramid level.
+        let mut levels = Vec::with_capacity(L.len());
+
+        for (l, (l_bx, l_by)) in L
+          .iter()
+          .zip(basis_pyramid_x.iter().zip(basis_pyramid_y.iter()))
+        {
+          let mut level = Vec::with_capacity(angles.len());
+          for angle in angles.iter() {
+            let cos_theta = angle.cos();
+            let sin_theta = angle.sin();
+            let mut steered = l.clone();
+            // Iterate through the mutable pixels in `steered`, and for each one set it to
+            // the value of `l_bx_pixel as f32 * cos_theta + l_by_pixel as f32 *
+            // sin_theta`, where `l_bx_pixel` and `l_by_pixel` are the
+            // corresponding pixels in the basis pyramids.
+            for y in 0..steered.height() {
+              for x in 0..steered.width() {
+                let l_bx_pixel = l_bx.get_pixel(x, y);
+                let l_by_pixel = l_by.get_pixel(x, y);
+                let mut pixel = steered.get_pixel(x, y);
+                pixel
+                  .channels_mut()
+                  .into_iter()
+                  .enumerate()
+                  .for_each(|(i, c)| {
+                    // need to rescale 0-255 to 0-1 first, then scale back to 0-255
+                    let l_bx_val = l_bx_pixel[i] as f32 / 255.0;
+                    let l_by_val = l_by_pixel[i] as f32 / 255.0;
+                    let result = l_bx_val * cos_theta + l_by_val * sin_theta;
+                    *c = (result * 255.0) as u8;
+                    // *c = (l_bx_val * cos_theta + l_by_val * sin_theta) as u8;
+                  });
+                steered.put_pixel(x, y, pixel);
+              }
+            }
+            level.push(steered);
+          }
+          levels.push(level);
+        }
+
+        // Now, append to each level the corresponding level in H
+        for (l, h) in levels.iter_mut().zip(H.iter()) {
+          l.push(h.clone());
+        }
+
+        Ok(ImagePyramid {
+          levels: levels.into_iter().map(ImagePyramidLevel::Bank).collect(),
+          params: params.clone(),
+        })
+      }
     }
   }
 }
@@ -1472,8 +1589,8 @@ mod tests {
 
   #[test]
   #[cfg_attr(not(feature = "steerable"), ignore)]
-  fn compute_image_pyramid_imagepyramidtype_steerable_unimplemented() {
-    let image = DynamicImage::new_rgb8(640, 480);
+  fn compute_image_pyramid_imagepyramidtype_steerable_produces_expected_filter_bank() {
+    let image = DynamicImage::new_rgb8(128, 128);
     let ipr = ImageToProcess(&image);
 
     let params = ImagePyramidParams {
@@ -1482,10 +1599,18 @@ mod tests {
     };
 
     let pyramid = ipr.compute_image_pyramid(Some(&params));
-    assert!(pyramid.is_err());
-    // And the error should be that the feature is unimplemented
-    let err = pyramid.unwrap_err();
-    assert!(matches!(err, ImagePyramidError::NotImplemented(_)));
+    assert!(pyramid.is_ok());
+    let pyramid = pyramid.unwrap();
+    assert_eq!(pyramid.levels.len(), 8);
+    // Each level should have the correct default number of steered responses, plus
+    // a highpass response for each level
+    for level in pyramid.levels.iter() {
+      if let ImagePyramidLevel::Bank(bank) = level {
+        assert_eq!(bank.len(), 5);
+      } else {
+        panic!("Expected ImagePyramidLevel::Bank, got something else");
+      }
+    }
   }
 
   #[test]
